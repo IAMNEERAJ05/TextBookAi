@@ -1,3 +1,4 @@
+import traceback
 from fastapi.responses import HTMLResponse
 from fastapi import (
     FastAPI,
@@ -11,7 +12,6 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from pathlib import Path
 import os
 from starlette.middleware.sessions import SessionMiddleware
 import shutil
@@ -23,6 +23,7 @@ from fastapi.templating import Jinja2Templates
 from pdf import generate_notes
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 load_dotenv()
 
@@ -159,7 +160,7 @@ async def home(request: Request):
 
 @app.post("/upload_pdf/")
 async def upload_pdf(request: Request, file: UploadFile = File(...)):
-    """Handle PDF upload and store file reference in session."""
+    """Handle PDF upload and store file details in the database."""
     username = request.session.get("username")
     if not username:
         return JSONResponse(
@@ -179,20 +180,128 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     upload_folder.mkdir(exist_ok=True)
 
     # Save the file locally
-    file_path = upload_folder / os.path.basename(str(file.filename))
+    file_path = upload_folder / file.filename  # type: ignore
     with file_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # Upload the file to Gemini and store its URI in the session
+    # Store the PDF path and username in the 'pdfs' table
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO pdfs (pdf_path, username) 
+            VALUES (%s, %s) RETURNING pdfid
+            """,
+            (str(file_path), username),
+        )
+        pdf_row = cur.fetchone()
+        if pdf_row:
+            pdf_id = pdf_row[0]
+        else:
+            return JSONResponse(
+                content={"error": "Failed to retrieve pdfid after insertion."},
+                status_code=500,
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return JSONResponse(
+            content={"error": "Database error: " + str(e)}, status_code=500
+        )
+    finally:
+        cur.close()
+
     uploaded_file = upload_to_gemini(file_path)
 
     # Store only the file name in the session
     request.session["uploaded_file_name"] = file_path.name
 
     # Generate topics after file upload
-    topics = generate_topics(uploaded_file)
+    topics_data = generate_topics(uploaded_file)
 
-    return {"message": "File uploaded", "file_name": file_path.name, "topics": topics}
+    # Store the chapters, topics, and subtopics in the database
+    try:
+        for chapter_data in topics_data:  # Assuming topics_data is a list
+            chapter_name = chapter_data["chapter"]
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO chapters (pdfid, chaptername) 
+                VALUES (%s, %s) RETURNING chapterid
+                """,
+                (pdf_id, chapter_name),
+            )
+            chapter_row = cur.fetchone()
+            if chapter_row:
+                chapter_id = chapter_row[0]
+            else:
+                return JSONResponse(
+                    content={"error": "Failed to retrieve chapterid after insertion."},
+                    status_code=500,
+                )
+            conn.commit()
+            cur.close()
+
+            for topic_data in chapter_data["topics"]:
+                topic_name = topic_data["topic"]
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO topics (chapterid, topicname) 
+                    VALUES (%s, %s) RETURNING topicid
+                    """,
+                    (chapter_id, topic_name),
+                )
+                topics_row = cur.fetchone()
+                if topics_row:
+                    topic_id = topics_row[0]
+                else:
+                    return JSONResponse(
+                        content={
+                            "error": "Failed to retrieve topicid after insertion."
+                        },
+                        status_code=500,
+                    )
+                conn.commit()
+                cur.close()
+
+                for subtopic_data in topic_data.get("sub_topics", []):
+                    if isinstance(subtopic_data, str):  # Handle subtopics as strings
+                        subtopic_name = (
+                            subtopic_data  # Use the string as the subtopic name
+                        )
+                        subtopic_content = None  # If no content is available, set it to None or leave it empty
+
+                        cur = conn.cursor()
+                        cur.execute(
+                            """
+                            INSERT INTO subtopics (topicid, subtopicname, content) 
+                            VALUES (%s, %s, %s)
+                            """,
+                            (topic_id, subtopic_name, subtopic_content),
+                        )
+                        conn.commit()
+                        cur.close()
+                    else:
+                        print("Warning: Subtopic data is not a string.", subtopic_data)
+
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return JSONResponse(
+            content={"error": "Database error: " + str(e)}, status_code=500
+        )
+    finally:
+        conn.close()
+
+    return {
+        "message": "File uploaded and processed successfully.",
+        "file_name": file_path.name,
+        "topics": topics_data,
+    }
 
 
 @app.get("/notes/")
@@ -216,6 +325,21 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
         notes = generate_notes(chapter, topic, subtopic, file_path)
         if not notes.strip():
             notes = "No notes generated for this subtopic."
+
+        # Update subtopic content in the database
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE subtopics
+            SET content = %s
+            WHERE subtopicname = %s
+            """,
+            (notes, subtopic),
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
     except Exception as e:
         logging.error(f"Error generating notes: {str(e)}")
         notes = f"Error generating notes: {str(e)}"
