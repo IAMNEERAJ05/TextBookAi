@@ -147,14 +147,106 @@ def logout(request: Request):
     return response
 
 
-# Home route
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Render the home page."""
+    """Render the home page"""
+
     username = request.session.get("username")
     email = request.session.get("email")
+    if not username:
+        return JSONResponse(
+            content={"error": "You need to be logged in to upload a file."},
+            status_code=401,
+        )
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Fetch only PDFs uploaded by the logged-in user
+        cur.execute(
+            """
+            SELECT p.pdfid, p.pdf_path, p.username, 
+                   c.chapterid, c.chaptername,
+                   t.topicid, t.topicname,
+                   s.subtopicid, s.subtopicname, s.content  
+            FROM pdfs p
+            LEFT JOIN chapters c ON p.pdfid = c.pdfid
+            LEFT JOIN topics t ON c.chapterid = t.chapterid
+            LEFT JOIN subtopics s ON t.topicid = s.topicid
+            WHERE p.username = %s
+            ORDER BY p.pdfid, c.chapterid, t.topicid, s.subtopicid
+            """,
+            (username,),  # Pass the current user's username to the query
+        )
+        pdfs = {}
+        for row in cur.fetchall():
+            pdfid = row["pdfid"]
+            if pdfid not in pdfs:
+                pdfs[pdfid] = {"pdf_path": row["pdf_path"], "chapters": {}}
+
+            chapterid = row["chapterid"]
+            if chapterid and chapterid not in pdfs[pdfid]["chapters"]:
+                pdfs[pdfid]["chapters"][chapterid] = {
+                    "chaptername": row["chaptername"],
+                    "topics": {},
+                }
+
+            topicid = row["topicid"]
+            if topicid and topicid not in pdfs[pdfid]["chapters"][chapterid]["topics"]:
+                pdfs[pdfid]["chapters"][chapterid]["topics"][topicid] = {
+                    "topicname": row["topicname"],
+                    "subtopics": {},
+                }
+
+            subtopicid = row["subtopicid"]
+            if subtopicid:
+                pdfs[pdfid]["chapters"][chapterid]["topics"][topicid]["subtopics"][
+                    subtopicid
+                ] = {
+                    "subtopicname": row["subtopicname"],
+                    "content": row["content"],
+                }
+
+        # Convert to a list of PDFs
+        pdf_list = [
+            {
+                "pdfid": pdfid,
+                "pdf_path": pdf_info["pdf_path"],
+                "chapters": [
+                    {
+                        "chapterid": chapterid,
+                        "chaptername": chapter_info["chaptername"],
+                        "topics": [
+                            {
+                                "topicid": topicid,
+                                "topicname": topic_info["topicname"],
+                                "subtopics": [
+                                    {
+                                        "subtopicid": subtopicid,
+                                        "subtopicname": subtopic_info["subtopicname"],
+                                        "content": subtopic_info["content"],
+                                    }
+                                    for subtopicid, subtopic_info in topic_info[
+                                        "subtopics"
+                                    ].items()
+                                ],
+                            }
+                            for topicid, topic_info in chapter_info["topics"].items()
+                        ],
+                    }
+                    for chapterid, chapter_info in pdf_info["chapters"].items()
+                ],
+            }
+            for pdfid, pdf_info in pdfs.items()
+        ]
+
+    finally:
+        cur.close()
+        conn.close()
+
     return templates.TemplateResponse(
-        "index.html", {"request": request, "username": username, "email": email}
+        "index.html",
+        {"request": request, "username": username, "email": email, "pdfs": pdf_list},
     )
 
 

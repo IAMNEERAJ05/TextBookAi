@@ -38,33 +38,127 @@
       </div>
       {% endif %}
 
-      <div class="card mb-4">
-        <div class="card-body">
-          <h5 class="card-title">Upload PDF</h5>
-          <form
-            action="/upload_pdf/"
-            method="post"
-            enctype="multipart/form-data"
-            id="upload-form"
+      <!-- Add Tabs for Upload and Library -->
+      <ul class="nav nav-tabs" id="pdfTabs" role="tablist">
+        <li class="nav-item" role="presentation">
+          <button
+            class="nav-link active"
+            id="upload-tab"
+            data-bs-toggle="tab"
+            data-bs-target="#upload"
+            type="button"
+            role="tab"
+            aria-controls="upload"
+            aria-selected="true"
           >
-            <div class="mb-3">
-              <div class="mb-3"></div>
-              <input
-                class="form-control"
-                type="file"
-                id="file"
-                name="file"
-                accept="application/pdf"
-                required
-              />
+            Upload PDF
+          </button>
+        </li>
+        <li class="nav-item" role="presentation">
+          <button
+            class="nav-link"
+            id="library-tab"
+            data-bs-toggle="tab"
+            data-bs-target="#library"
+            type="button"
+            role="tab"
+            aria-controls="library"
+            aria-selected="false"
+          >
+            Library
+          </button>
+        </li>
+      </ul>
+
+      <!-- Tab Content -->
+      <div class="tab-content" id="pdfTabsContent">
+        <!-- Upload Section -->
+        <div
+          class="tab-pane fade show active"
+          id="upload"
+          role="tabpanel"
+          aria-labelledby="upload-tab"
+        >
+          <div class="card mb-4">
+            <div class="card-body">
+              <h5 class="card-title">Upload PDF</h5>
+              <form
+                action="/upload_pdf/"
+                method="post"
+                enctype="multipart/form-data"
+                id="upload-form"
+              >
+                <div class="mb-3">
+                  <div class="mb-3"></div>
+                  <input
+                    class="form-control"
+                    type="file"
+                    id="file"
+                    name="file"
+                    accept="application/pdf"
+                    required
+                  />
+                </div>
+                <button type="submit" class="btn btn-primary">Generate</button>
+              </form>
             </div>
-            <button type="submit" class="btn btn-primary">Generate</button>
-          </form>
+          </div>
+          <div id="response" class="mt-4"></div>
         </div>
-      </div>
 
-      <div id="response" class="mt-4"></div>
+        <!-- Library Section -->
+        <div class="tab-pane fade" id="library" role="tabpanel" aria-labelledby="library-tab">
+          <div class="card mb-4">
+            <div class="card-body">
+              <h5 class="card-title">Library</h5>
+        
+              {% if pdfs %}
+              <ul class="list-group">
+                {% for pdf in pdfs %}
+                <li class="list-group-item">
+                  <a data-bs-toggle="collapse" href="#pdf-{{ pdf.pdfid }}" role="button" aria-expanded="false" aria-controls="pdf-{{ pdf.pdfid }}">
+                    {{ pdf.pdf_path }}
+                  </a>
+        
+                  <div class="collapse mt-2" id="pdf-{{ pdf.pdfid }}">
+                    <ul class="list-group">
+                      {% for chapter in pdf.chapters %}
+                      <li class="list-group-item">
+                        <strong>{{ chapter.chaptername }}</strong>
+        
+                        <ul class="list-group mt-2">
+                          {% for topic in chapter.topics %}
+                          <li class="list-group-item">
+                            <strong>{{ topic.topicname }}</strong>
+        
+                            <ul class="list-group mt-2">
+                              {% for subtopic in topic.subtopics %}
+                              <li class="list-group-item">
+                                <a href="/notes?pdf={{ pdf.pdfid }}&chapter={{ chapter.chapterid }}&topic={{ topic.topicid }}&subtopic={{ subtopic.subtopicid }}" target="_blank">
+                                  {{ subtopic.subtopicname }}
+                                </a>
+                              </li>
+                              {% endfor %}
+                            </ul>
+                          </li>
+                          {% endfor %}
+                        </ul>
+                      </li>
+                      {% endfor %}
+                    </ul>
+                  </div>
+                </li>
+                {% endfor %}
+              </ul>
+              {% else %}
+              <p>No PDFs uploaded yet.</p>
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>        
 
+      <div class="about-section mt-5">
       <div class="about-section">
         <details>
           <summary><h2>About VidyAI</h2></summary>
