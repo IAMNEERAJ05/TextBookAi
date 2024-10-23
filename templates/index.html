@@ -14,6 +14,32 @@
       rel="stylesheet"
     />
     <link rel="stylesheet" href="/static/css/index.css" />
+    <style>
+      /* Custom styles */
+      .subtopic-link {
+        color: #007bff; /* Color for better visibility */
+        text-decoration: none; /* Remove underline */
+        font-weight: bold; /* Make it bold */
+      }
+      .subtopic-link:hover {
+        color: #0056b3; /* Darker color on hover */
+      }
+      .chapter-title {
+        color: #333; /* Darker color for chapter names */
+        font-weight: bold; /* Make chapter names bold */
+      }
+      .topic-title {
+        color: #555; /* Slightly darker for topic names */
+      }
+      .pdf-link {
+        color: #333; /* Darker color for PDF names */
+        text-decoration: none; 
+        font-size: larger;
+      }
+      .pdf-link:hover {
+        color: #4bc8e4; /* Change color on hover */
+      }
+    </style>
   </head>
   <body>
     <div class="container custom-container mt-5">
@@ -89,7 +115,6 @@
                 id="upload-form"
               >
                 <div class="mb-3">
-                  <div class="mb-3"></div>
                   <input
                     class="form-control"
                     type="file"
@@ -116,7 +141,7 @@
               <ul class="list-group">
                 {% for pdf in pdfs %}
                 <li class="list-group-item">
-                  <a data-bs-toggle="collapse" href="#pdf-{{ pdf.pdfid }}" role="button" aria-expanded="false" aria-controls="pdf-{{ pdf.pdfid }}">
+                  <a data-bs-toggle="collapse" href="#pdf-{{ pdf.pdfid }}" role="button" aria-expanded="false" aria-controls="pdf-{{ pdf.pdfid }}" class="pdf-link">
                     {{ pdf.pdf_path }}
                   </a>
         
@@ -124,17 +149,17 @@
                     <ul class="list-group">
                       {% for chapter in pdf.chapters %}
                       <li class="list-group-item">
-                        <strong>{{ chapter.chaptername }}</strong>
+                        <strong class="chapter-title">{{ chapter.chaptername }}</strong>
         
                         <ul class="list-group mt-2">
                           {% for topic in chapter.topics %}
                           <li class="list-group-item">
-                            <strong>{{ topic.topicname }}</strong>
+                            <strong class="topic-title">{{ topic.topicname }}</strong>
         
                             <ul class="list-group mt-2">
                               {% for subtopic in topic.subtopics %}
                               <li class="list-group-item">
-                                <a href="/notes?pdf={{ pdf.pdfid }}&chapter={{ chapter.chapterid }}&topic={{ topic.topicid }}&subtopic={{ subtopic.subtopicid }}" target="_blank">
+                                <a href="/notes?pdf={{ pdf.pdfid }}&chapter={{ chapter.chapterid }}&topic={{ topic.topicid }}&subtopic={{ subtopic.subtopicid }}" target="_blank" class="subtopic-link">
                                   {{ subtopic.subtopicname }}
                                 </a>
                               </li>
@@ -156,7 +181,7 @@
             </div>
           </div>
         </div>
-      </div>        
+      </div>         
 
       <div class="about-section mt-5">
       <div class="about-section">

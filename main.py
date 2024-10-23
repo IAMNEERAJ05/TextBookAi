@@ -398,7 +398,7 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
 
 @app.get("/notes/")
 async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
-    """Generate notes for the subtopic and render the notes.html template."""
+    """Generate notes for the subtopic if not already present and render the notes.html template."""
     file_name = request.session.get("uploaded_file_name")
     if not file_name:
         return HTMLResponse(
@@ -411,39 +411,115 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
         return HTMLResponse(
             "File not found in storage. Please upload the PDF again.", status_code=400
         )
+    conn = get_db_connection()
+    cur = conn.cursor()
 
-    # Generate notes
-    try:
-        notes = generate_notes(chapter, topic, subtopic, file_path)
-        if not notes.strip():
-            notes = "No notes generated for this subtopic."
-
-        # Update subtopic content in the database
-        conn = get_db_connection()
-        cur = conn.cursor()
+    if not topic.isdigit():
         cur.execute(
             """
-            UPDATE subtopics
-            SET content = %s
-            WHERE subtopicname = %s
-            """,
-            (notes, subtopic),
+        SELECT s.content, t.topicname, s.subtopicname, c.chaptername
+        FROM subtopics s
+        JOIN topics t ON s.topicid = t.topicid
+        JOIN chapters c ON t.chapterid = c.chapterid
+        WHERE c.chaptername = %s AND t.topicname = %s AND s.subtopicname = %s
+        """,
+            (chapter, topic, subtopic),
         )
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logging.error(f"Error generating notes: {str(e)}")
-        notes = f"Error generating notes: {str(e)}"
+        notes = ""
+        result = cur.fetchone()
+        if result and result[0]:  # If content exists and is not None/empty
+            notes = result[0]
+        else:
+            try:
 
-    # Render the template with the generated notes
+                notes = generate_notes(chapter, topic, subtopic, file_path)
+                if not notes.strip():
+                    notes = "No notes generated for this subtopic."
+
+                cur.execute(
+                    """
+                    UPDATE subtopics
+                    SET content = %s
+                    WHERE subtopicname = %s
+                    """,
+                    (notes, subtopic),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+            except Exception as e:
+                logging.error(f"Error generating notes: {str(e)}")
+                notes = f"Error generating notes: {str(e)}"
+
+        # Render the template with the generated notes
+        return templates.TemplateResponse(
+            "notes.html",
+            {
+                "request": request,
+                "chapter": chapter,
+                "topic": topic,
+                "subtopic": subtopic,
+                "notes": notes,
+            },
+        )
+
+    # Fetch the existing subtopic content and the topic and subtopic names from the database
+    cur.execute(
+        """
+        SELECT s.content, t.topicname, s.subtopicname
+        FROM subtopics s
+        JOIN topics t ON s.topicid = t.topicid
+        WHERE s.subtopicid = %s
+        """,
+        (subtopic,),
+    )
+    topic_name = ""
+    subtopic_name = ""
+    result = cur.fetchone()
+    # Check if content exists in the database
+    if (
+        result and result[0] and result[1] and result[2]
+    ):  # If content exists and is not None/empty
+        notes = result[0]
+        topic_name = result[1]
+        subtopic_name = result[2]
+    else:
+        # Fetch the topic name and subtopic name from the result
+        topic_name = result[1]  # type: ignore
+        subtopic_name = result[2]  # type: ignore
+
+        # Generate notes if no content is found
+        try:
+            notes = generate_notes(chapter, topic_name, subtopic_name, file_path)
+            if not notes.strip():
+                notes = "No notes generated for this subtopic."
+
+            # Update the subtopic content in the database with the generated notes
+            cur.execute(
+                """
+                UPDATE subtopics
+                SET content = %s
+                WHERE subtopicid = %s
+                """,
+                (notes, subtopic),
+            )
+            conn.commit()
+
+        except Exception as e:
+            logging.error(f"Error generating notes: {str(e)}")
+            notes = f"Error generating notes: {str(e)}"
+
+    cur.close()
+    conn.close()
+
+    # Render the template with the existing or generated notes
     return templates.TemplateResponse(
         "notes.html",
         {
             "request": request,
             "chapter": chapter,
-            "topic": topic,
-            "subtopic": subtopic,
-            "notes": notes,
+            "topic": topic,  # Pass the correct topic name
+            "subtopic": subtopic_name,  # Pass the correct subtopic name  # type: ignore
+            "notes": notes,  # type: ignore
         },
     )
