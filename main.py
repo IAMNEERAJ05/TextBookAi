@@ -6,6 +6,7 @@ from fastapi import (
     Form,
     UploadFile,
     File,
+    HTTPException,
 )
 from starlette.requests import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -431,7 +432,6 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
             notes = result[0]
         else:
             try:
-
                 notes = generate_notes(chapter, topic, subtopic, file_path)
                 if not notes.strip():
                     notes = "No notes generated for this subtopic."
@@ -462,64 +462,82 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
                 "notes": notes,
             },
         )
-
-    # Fetch the existing subtopic content and the topic and subtopic names from the database
-    cur.execute(
-        """
-        SELECT s.content, t.topicname, s.subtopicname
-        FROM subtopics s
-        JOIN topics t ON s.topicid = t.topicid
-        WHERE s.subtopicid = %s
-        """,
-        (subtopic,),
-    )
-    topic_name = ""
-    subtopic_name = ""
-    result = cur.fetchone()
-    # Check if content exists in the database
-    if (
-        result and result[0] and result[1] and result[2]
-    ):  # If content exists and is not None/empty
-        notes = result[0]
-        topic_name = result[1]
-        subtopic_name = result[2]
     else:
-        # Fetch the topic name and subtopic name from the result
+        # Fetch the existing subtopic content and the topic and subtopic names from the database
+        cur.execute(
+            """
+            SELECT s.content, t.topicname, s.subtopicname, c.chaptername
+            FROM subtopics s
+            JOIN topics t ON s.topicid = t.topicid
+            JOIN chapters c ON c.chapterid = t.chapterid
+            WHERE s.subtopicid = %s
+            """,
+            (subtopic,),
+        )
+        result = cur.fetchone()
         topic_name = result[1]  # type: ignore
         subtopic_name = result[2]  # type: ignore
+        notes = ""
+        chapter = result[3]  # type: ignore
+        if result and result[0]:  # If content exists and is not None/empty
+            notes = result[0]
+        else:
+            # Generate notes if no content is found
+            try:
+                notes = generate_notes(chapter, topic_name, subtopic_name, file_path)
+                if not notes.strip():
+                    notes = "No notes generated for this subtopic."
 
-        # Generate notes if no content is found
-        try:
-            notes = generate_notes(chapter, topic_name, subtopic_name, file_path)
-            if not notes.strip():
-                notes = "No notes generated for this subtopic."
+                # Update the subtopic content in the database with the generated notes
+                cur.execute(
+                    """
+                    UPDATE subtopics
+                    SET content = %s
+                    WHERE subtopicid = %s
+                    """,
+                    (notes, subtopic),
+                )
+                conn.commit()
 
-            # Update the subtopic content in the database with the generated notes
-            cur.execute(
-                """
-                UPDATE subtopics
-                SET content = %s
-                WHERE subtopicid = %s
-                """,
-                (notes, subtopic),
-            )
-            conn.commit()
+            except Exception as e:
+                logging.error(f"Error generating notes: {str(e)}")
+                notes = f"Error generating notes: {str(e)}"
 
-        except Exception as e:
-            logging.error(f"Error generating notes: {str(e)}")
-            notes = f"Error generating notes: {str(e)}"
+        cur.close()
+        conn.close()
+        print(notes)
+        # Render the template with the existing or generated notes
+        return templates.TemplateResponse(
+            "notes.html",
+            {
+                "request": request,
+                "chapter": chapter,
+                "topic": topic_name,  # Pass the correct topic name
+                "subtopic": subtopic_name,  # Pass the correct subtopic name
+                "notes": notes,
+            },
+        )
 
-    cur.close()
-    conn.close()
 
-    # Render the template with the existing or generated notes
-    return templates.TemplateResponse(
-        "notes.html",
-        {
-            "request": request,
-            "chapter": chapter,
-            "topic": topic,  # Pass the correct topic name
-            "subtopic": subtopic_name,  # Pass the correct subtopic name  # type: ignore
-            "notes": notes,  # type: ignore
-        },
-    )
+@app.delete("/delete_pdf/{pdfid}")
+async def delete_pdf(pdfid: int):
+    try:
+        conn = get_db_connection()  # Get the database connection
+        cur = conn.cursor()
+
+        # Execute delete query
+        cur.execute("DELETE FROM pdfs WHERE pdfid = %s", (pdfid,))
+        conn.commit()
+
+        # Check if the PDF was deleted (affects rows)
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="PDF not found")
+
+        # Close connection and cursor
+        cur.close()
+        conn.close()
+
+        return {"detail": "PDF deleted successfully"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to delete PDF")
