@@ -1,10 +1,18 @@
-from fastapi import FastAPI, Request, Form, UploadFile, File
+import traceback
+from fastapi.responses import HTMLResponse
+from fastapi import (
+    FastAPI,
+    Request,
+    Form,
+    UploadFile,
+    File,
+    HTTPException,
+)
 from starlette.requests import Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from pathlib import Path
 import os
 from starlette.middleware.sessions import SessionMiddleware
 import shutil
@@ -22,6 +30,7 @@ from fastapi.templating import Jinja2Templates
 from pdf import generate_subtopic_notes
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 import html
 
 load_dotenv()
@@ -144,20 +153,112 @@ def logout(request: Request):
     return response
 
 
-# Home route
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    """Render the home page."""
+    """Render the home page"""
+
     username = request.session.get("username")
     email = request.session.get("email")
+    if not username:
+        return JSONResponse(
+            content={"error": "You need to be logged in to upload a file."},
+            status_code=401,
+        )
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+
+    try:
+        # Fetch only PDFs uploaded by the logged-in user
+        cur.execute(
+            """
+            SELECT p.pdfid, p.pdf_path, p.username, 
+                   c.chapterid, c.chaptername,
+                   t.topicid, t.topicname,
+                   s.subtopicid, s.subtopicname, s.content  
+            FROM pdfs p
+            LEFT JOIN chapters c ON p.pdfid = c.pdfid
+            LEFT JOIN topics t ON c.chapterid = t.chapterid
+            LEFT JOIN subtopics s ON t.topicid = s.topicid
+            WHERE p.username = %s
+            ORDER BY p.pdfid, c.chapterid, t.topicid, s.subtopicid
+            """,
+            (username,),  # Pass the current user's username to the query
+        )
+        pdfs = {}
+        for row in cur.fetchall():
+            pdfid = row["pdfid"]
+            if pdfid not in pdfs:
+                pdfs[pdfid] = {"pdf_path": row["pdf_path"], "chapters": {}}
+
+            chapterid = row["chapterid"]
+            if chapterid and chapterid not in pdfs[pdfid]["chapters"]:
+                pdfs[pdfid]["chapters"][chapterid] = {
+                    "chaptername": row["chaptername"],
+                    "topics": {},
+                }
+
+            topicid = row["topicid"]
+            if topicid and topicid not in pdfs[pdfid]["chapters"][chapterid]["topics"]:
+                pdfs[pdfid]["chapters"][chapterid]["topics"][topicid] = {
+                    "topicname": row["topicname"],
+                    "subtopics": {},
+                }
+
+            subtopicid = row["subtopicid"]
+            if subtopicid:
+                pdfs[pdfid]["chapters"][chapterid]["topics"][topicid]["subtopics"][
+                    subtopicid
+                ] = {
+                    "subtopicname": row["subtopicname"],
+                    "content": row["content"],
+                }
+
+        # Convert to a list of PDFs
+        pdf_list = [
+            {
+                "pdfid": pdfid,
+                "pdf_path": pdf_info["pdf_path"],
+                "chapters": [
+                    {
+                        "chapterid": chapterid,
+                        "chaptername": chapter_info["chaptername"],
+                        "topics": [
+                            {
+                                "topicid": topicid,
+                                "topicname": topic_info["topicname"],
+                                "subtopics": [
+                                    {
+                                        "subtopicid": subtopicid,
+                                        "subtopicname": subtopic_info["subtopicname"],
+                                        "content": subtopic_info["content"],
+                                    }
+                                    for subtopicid, subtopic_info in topic_info[
+                                        "subtopics"
+                                    ].items()
+                                ],
+                            }
+                            for topicid, topic_info in chapter_info["topics"].items()
+                        ],
+                    }
+                    for chapterid, chapter_info in pdf_info["chapters"].items()
+                ],
+            }
+            for pdfid, pdf_info in pdfs.items()
+        ]
+
+    finally:
+        cur.close()
+        conn.close()
+
     return templates.TemplateResponse(
-        "index.html", {"request": request, "username": username, "email": email}
+        "index.html",
+        {"request": request, "username": username, "email": email, "pdfs": pdf_list},
     )
 
 
 @app.post("/upload_pdf/")
 async def upload_pdf(request: Request, file: UploadFile = File(...)):
-    """Handle PDF upload, extract images, and store file reference in session."""
+    """Handle PDF upload, extract images, and store file details in the database."""
     username = request.session.get("username")
     if not username:
         return JSONResponse(
@@ -188,7 +289,36 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     # Extract images from the PDF
     image_files = extract_images_from_pdf(file_path, images_folder)
 
-    # Upload the file to Gemini and store its URI in the session
+    # Store the PDF path and username in the 'pdfs' table
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    try:
+        cur.execute(
+            """
+            INSERT INTO pdfs (pdf_path, username) 
+            VALUES (%s, %s) RETURNING pdfid
+            """,
+            (str(file_path), username),
+        )
+        pdf_row = cur.fetchone()
+        if pdf_row:
+            pdf_id = pdf_row[0]
+        else:
+            return JSONResponse(
+                content={"error": "Failed to retrieve pdfid after insertion."},
+                status_code=500,
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return JSONResponse(
+            content={"error": "Database error: " + str(e)}, status_code=500
+        )
+    finally:
+        cur.close()
+
     uploaded_file = upload_to_gemini(file_path)
 
     # Store the file path and image files relative to the uploads folder in the session
@@ -198,9 +328,88 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     ]
 
     # Generate topics after file upload
-    topics = generate_topics(uploaded_file)
+    topics_data = generate_topics(uploaded_file)
 
-    return {"message": "File uploaded", "file_name": file_path.name, "topics": topics}
+    # Store the chapters, topics, and subtopics in the database
+    try:
+        for chapter_data in topics_data:  # Assuming topics_data is a list
+            chapter_name = chapter_data["chapter"]
+            cur = conn.cursor()
+            cur.execute(
+                """
+                INSERT INTO chapters (pdfid, chaptername) 
+                VALUES (%s, %s) RETURNING chapterid
+                """,
+                (pdf_id, chapter_name),
+            )
+            chapter_row = cur.fetchone()
+            if chapter_row:
+                chapter_id = chapter_row[0]
+            else:
+                return JSONResponse(
+                    content={"error": "Failed to retrieve chapterid after insertion."},
+                    status_code=500,
+                )
+            conn.commit()
+            cur.close()
+
+            for topic_data in chapter_data["topics"]:
+                topic_name = topic_data["topic"]
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    INSERT INTO topics (chapterid, topicname) 
+                    VALUES (%s, %s) RETURNING topicid
+                    """,
+                    (chapter_id, topic_name),
+                )
+                topics_row = cur.fetchone()
+                if topics_row:
+                    topic_id = topics_row[0]
+                else:
+                    return JSONResponse(
+                        content={
+                            "error": "Failed to retrieve topicid after insertion."
+                        },
+                        status_code=500,
+                    )
+                conn.commit()
+                cur.close()
+
+                for subtopic_data in topic_data.get("sub_topics", []):
+                    if isinstance(subtopic_data, str):  # Handle subtopics as strings
+                        subtopic_name = (
+                            subtopic_data  # Use the string as the subtopic name
+                        )
+                        subtopic_content = None  # If no content is available, set it to None or leave it empty
+
+                        cur = conn.cursor()
+                        cur.execute(
+                            """
+                            INSERT INTO subtopics (topicid, subtopicname, content) 
+                            VALUES (%s, %s, %s)
+                            """,
+                            (topic_id, subtopic_name, subtopic_content),
+                        )
+                        conn.commit()
+                        cur.close()
+                    else:
+                        print("Warning: Subtopic data is not a string.", subtopic_data)
+
+    except Exception as e:
+        conn.rollback()
+        traceback.print_exc()
+        return JSONResponse(
+            content={"error": "Database error: " + str(e)}, status_code=500
+        )
+    finally:
+        conn.close()
+
+    return {
+        "message": "File uploaded and processed successfully.",
+        "file_name": file_path.name,
+        "topics": topics_data,
+    }
 
 
 # Add this function to escape the markdown
@@ -398,3 +607,27 @@ async def get_image(image_name: str):
     if not image_path.exists():
         return JSONResponse(content={"error": "Image not found"}, status_code=404)
     return FileResponse(image_path)
+
+
+@app.delete("/delete_pdf/{pdfid}")
+async def delete_pdf(pdfid: int):
+    try:
+        conn = get_db_connection()  # Get the database connection
+        cur = conn.cursor()
+
+        # Execute delete query
+        cur.execute("DELETE FROM pdfs WHERE pdfid = %s", (pdfid,))
+        conn.commit()
+
+        # Check if the PDF was deleted (affects rows)
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="PDF not found")
+
+        # Close connection and cursor
+        cur.close()
+        conn.close()
+
+        return {"detail": "PDF deleted successfully"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="Failed to delete PDF")
