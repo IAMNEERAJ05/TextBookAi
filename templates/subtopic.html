@@ -35,12 +35,12 @@
           <p>Loading notes...</p>
         </div>
       </div>
+      <div id="subtopicImage" class="mt-3"></div>
     </div>
     <div class="mb-5"></div>
 
     <script>
       async function loadSubtopicNotes() {
-        const subtopicNotesDiv = document.getElementById("subtopicNotes");
         try {
           const response = await fetch(
             `/api/notes/{{ chapter | urlencode }}/{{ topic | urlencode }}/{{ subtopic | urlencode }}`
@@ -48,16 +48,40 @@
           if (response.ok) {
             const data = await response.json();
             if (data.error) {
-              subtopicNotesDiv.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+              document.getElementById(
+                "subtopicNotes"
+              ).innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
             } else {
-              subtopicNotesDiv.innerHTML = marked.parse(data.notes);
+              // Use marked to convert markdown to HTML
+              document.getElementById("subtopicNotes").innerHTML = marked.parse(
+                data.notes
+              );
+              if (data.images && data.images.length > 0) {
+                const imagesHTML = data.images
+                  .map(
+                    (image, index) => `
+                      <figure class="figure">
+                        <img src="/images/${data.username}/images/${data.pdf_folder}/${image.filename}" alt="Subtopic image" class="img-fluid mb-2">
+                        <figcaption class="figure-caption text-center">${image.caption}</figcaption>
+                      </figure>
+                    `
+                  )
+                  .join("");
+                document.getElementById("subtopicImage").innerHTML = imagesHTML;
+              } else {
+                document.getElementById("subtopicImage").innerHTML = ""; // Clear the image div if no images
+              }
             }
           } else {
-            subtopicNotesDiv.innerHTML = `<div class="alert alert-danger">An error occurred while loading the notes. Status: ${response.status}</div>`;
+            document.getElementById(
+              "subtopicNotes"
+            ).innerHTML = `<div class="alert alert-danger">An error occurred while loading the notes. Status: ${response.status}</div>`;
           }
         } catch (error) {
           console.error("Error loading subtopic notes:", error);
-          subtopicNotesDiv.innerHTML = `<div class="alert alert-danger">An error occurred while loading the notes: ${error.message}</div>`;
+          document.getElementById(
+            "subtopicNotes"
+          ).innerHTML = `<div class="alert alert-danger">An error occurred while loading the notes: ${error.message}</div>`;
         }
       }
 

@@ -1,13 +1,6 @@
-from fastapi.responses import HTMLResponse
-from fastapi import (
-    FastAPI,
-    Request,
-    Form,
-    UploadFile,
-    File,
-)
+from fastapi import FastAPI, Request, Form, UploadFile, File
 from starlette.requests import Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, FileResponse
 from starlette.middleware.sessions import SessionMiddleware
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -15,23 +8,31 @@ from pathlib import Path
 import os
 from starlette.middleware.sessions import SessionMiddleware
 import shutil
-from pdf import upload_to_gemini, generate_topics, generate_topic_notes, generate_quiz
+from pdf import (
+    upload_to_gemini,
+    generate_topics,
+    generate_topic_notes,
+    generate_quiz,
+    extract_images_from_pdf,
+)
 from passlib.context import CryptContext
 import logging
 from db import hash_password, verify_password
 from fastapi.templating import Jinja2Templates
-from pdf import generate_notes
+from pdf import generate_subtopic_notes
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
 import html
 
 load_dotenv()
-
+logging.basicConfig(level=logging.INFO)
 
 # Set up FastAPI
 app = FastAPI()
 # Mount the static directory
 app.mount("/static", StaticFiles(directory="static"), name="static")
+# Mount the images directory
+app.mount("/images", StaticFiles(directory="uploads"), name="images")
 
 # Add session middleware (from starlette)
 app.add_middleware(SessionMiddleware, secret_key="your_secret_key_here")
@@ -128,10 +129,6 @@ async def login(
     return RedirectResponse(url="/", status_code=302)
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-
-
 @app.get("/logout")
 def logout(request: Request):
     """Handle user logout process."""
@@ -160,7 +157,7 @@ async def home(request: Request):
 
 @app.post("/upload_pdf/")
 async def upload_pdf(request: Request, file: UploadFile = File(...)):
-    """Handle PDF upload and store file reference in session."""
+    """Handle PDF upload, extract images, and store file reference in session."""
     username = request.session.get("username")
     if not username:
         return JSONResponse(
@@ -179,16 +176,26 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
     user_folder = Path("uploads") / username
     user_folder.mkdir(parents=True, exist_ok=True)
 
+    # Create a folder for images
+    images_folder = user_folder / "images"
+    images_folder.mkdir(exist_ok=True)
+
     # Save the file locally in the user's folder
     file_path = user_folder / os.path.basename(str(file.filename))
     with file_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
+    # Extract images from the PDF
+    image_files = extract_images_from_pdf(file_path, images_folder)
+
     # Upload the file to Gemini and store its URI in the session
     uploaded_file = upload_to_gemini(file_path)
 
-    # Store the file path relative to the uploads folder in the session
+    # Store the file path and image files relative to the uploads folder in the session
     request.session["uploaded_file_path"] = str(file_path.relative_to(Path("uploads")))
+    request.session["image_files"] = [
+        str(Path(img).relative_to(Path("uploads"))) for img in image_files
+    ]
 
     # Generate topics after file upload
     topics = generate_topics(uploaded_file)
@@ -271,11 +278,12 @@ async def subtopic_page(request: Request, chapter: str, topic: str, subtopic: st
 
 @app.get("/api/notes/{chapter}/{topic}/{subtopic}")
 async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
-    """Generate notes for the subtopic and return JSON."""
     relative_file_path = request.session.get("uploaded_file_path")
-    if not relative_file_path:
+    image_files = request.session.get("image_files", [])
+    username = request.session.get("username")
+    if not relative_file_path or not username:
         return JSONResponse(
-            content={"error": "No file found in session. Please upload a PDF."},
+            content={"error": "No file found in session or user not logged in."},
             status_code=400,
         )
 
@@ -289,24 +297,46 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
         )
 
     try:
-        notes = generate_notes(chapter, topic, subtopic, file_path)
-        if not notes.strip():
-            notes = "No notes generated for this subtopic."
-        return JSONResponse(content={"notes": notes})
+        result = generate_subtopic_notes(
+            chapter, topic, subtopic, file_path, image_files
+        )
+
+        # Extract the PDF-specific folder name from the first image path
+        if result.get("images"):
+            pdf_folder = Path(result["images"][0]["filename"]).parent.name
+        else:
+            pdf_folder = ""
+
+        # Process image data - keep only the filename and caption
+        images = [
+            {"filename": Path(img["filename"]).name, "caption": img["caption"]}
+            for img in result.get("images", [])
+        ]
+
+        return JSONResponse(
+            content={
+                "notes": result.get("notes", "No notes generated for this subtopic."),
+                "images": images,
+                "username": username,
+                "pdf_folder": pdf_folder,
+            }
+        )
     except Exception as e:
         logging.error(f"Error generating notes: {str(e)}")
         return JSONResponse(
-            content={"error": f"Error generating notes: {str(e)}"}, status_code=500
+            content={"error": f"Error generating notes: {str(e)}"},
+            status_code=500,
         )
 
 
 @app.get("/api/topic_notes/{chapter}/{topic}")
 async def get_topic_notes(request: Request, chapter: str, topic: str):
-    """Generate notes for the topic and return JSON."""
     relative_file_path = request.session.get("uploaded_file_path")
-    if not relative_file_path:
+    image_files = request.session.get("image_files", [])
+    username = request.session.get("username")
+    if not relative_file_path or not username:
         return JSONResponse(
-            content={"error": "No file found in session. Please upload a PDF."},
+            content={"error": "No file found in session or user not logged in."},
             status_code=400,
         )
 
@@ -321,11 +351,29 @@ async def get_topic_notes(request: Request, chapter: str, topic: str):
 
     try:
         file = upload_to_gemini(file_path)
-        topic_notes = generate_topic_notes(file, chapter, topic)
-        if not topic_notes.strip():
-            topic_notes = "No notes generated for this topic."
+        result = generate_topic_notes(file, chapter, topic, image_files)
+
+        # Extract the PDF-specific folder name from the first image path
+        if result.get("images"):
+            pdf_folder = Path(result["images"][0]["filename"]).parent.name
+        else:
+            pdf_folder = ""
+
+        # Process image data - keep only the filename and caption
+        images = [
+            {"filename": Path(img["filename"]).name, "caption": img["caption"]}
+            for img in result.get("images", [])
+        ]
+
         return JSONResponse(
-            content={"chapter_overview": "", "topic_notes": topic_notes}
+            content={
+                "topic_notes": result.get(
+                    "notes", "No notes generated for this topic."
+                ),
+                "images": images,
+                "username": username,
+                "pdf_folder": pdf_folder,
+            }
         )
     except Exception as e:
         logging.error(f"Error generating topic notes: {str(e)}")
@@ -333,3 +381,20 @@ async def get_topic_notes(request: Request, chapter: str, topic: str):
             content={"error": f"Error generating topic notes: {str(e)}"},
             status_code=500,
         )
+
+
+# Add a new route to serve images
+@app.get("/{image_name}")
+async def get_image(image_name: str):
+    """Serves images from the uploads folder.
+
+    Args:
+        image_name (str): Image file name
+
+    Returns:
+        FileResponse: File response object
+    """
+    image_path = Path("uploads") / image_name
+    if not image_path.exists():
+        return JSONResponse(content={"error": "Image not found"}, status_code=404)
+    return FileResponse(image_path)

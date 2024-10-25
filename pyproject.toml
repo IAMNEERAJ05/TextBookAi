@@ -24,6 +24,7 @@ psycopg2 = "^2.9.9"
 fastapi-login = "^1.10.2"
 fastapi-session = "0.2.7"
 itsdangerous = "^2.2.0"
+pymupdf = "^1.24.12"
 
 
 [build-system]

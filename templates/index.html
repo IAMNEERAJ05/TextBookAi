@@ -243,30 +243,32 @@
 
           if (response.ok) {
             const data = await response.json();
+            console.log("Server response:", data); // Log the entire response
+
             if (data.error) {
               responseDiv.innerHTML = data.error;
               showToast();
-            } else {
+            } else if (data.topics && Array.isArray(data.topics)) {
               let chaptersHTML =
                 '<div class="topics-container"><h2>Book Structure</h2>';
               chaptersHTML += renderChapters(data.topics);
               chaptersHTML += "</div>";
               responseDiv.innerHTML = chaptersHTML;
               contentGenerated = true;
+            } else {
+              console.error("Invalid response format:", data);
+              responseDiv.innerHTML =
+                "Received an unexpected response format from the server.";
             }
           } else {
-            const errorData = await response.json();
-            responseDiv.innerHTML =
-              errorData.error || "An error occurred during upload.";
-            showToast();
+            throw new Error(
+              `Response not OK: ${response.status} ${response.statusText}`
+            );
           }
         } catch (error) {
-          if (error.name === "AbortError") {
-            responseDiv.innerHTML = "Generation was cancelled.";
-          } else {
-            responseDiv.innerHTML = "An error occurred during upload.";
-            showToast();
-          }
+          console.error("Error details:", error);
+          responseDiv.innerHTML = `An error occurred during upload: ${error.message}`;
+          showToast();
         } finally {
           loader.style.display = "none"; // Hide the loader
           resetButtons();
@@ -274,17 +276,34 @@
       }
 
       function renderChapters(chapters) {
+        if (!Array.isArray(chapters) || chapters.length === 0) {
+          console.warn("No chapters to render:", chapters);
+          return "<p>No chapters found in the uploaded document.</p>";
+        }
+
         return chapters
           .map((chapter) => {
+            if (!chapter || typeof chapter !== "object") {
+              console.warn("Invalid chapter object:", chapter);
+              return "";
+            }
+
             let chapterHTML = `
           <details class="chapter-details">
-              <summary><h3>${chapter.chapter}</h3></summary>
+              <summary><h3>${
+                chapter.chapter || "Unnamed Chapter"
+              }</h3></summary>
               <div class="content">
                   <ul>`;
-            chapterHTML += renderTopics(chapter.topics, chapter.chapter);
+            chapterHTML += renderTopics(
+              chapter.topics || [],
+              chapter.chapter || "Unnamed Chapter"
+            );
             chapterHTML += `
                   </ul>
-                  <button class="btn btn-primary mt-3" onclick="openQuiz('${chapter.chapter}')">Take Quiz</button>
+                  <button class="btn btn-primary mt-3" onclick="openQuiz('${
+                    chapter.chapter || "Unnamed Chapter"
+                  }')">Take Quiz</button>
               </div>
           </details>`;
             return chapterHTML;
@@ -293,35 +312,44 @@
       }
 
       function renderTopics(topics, chapter, parentTopic = "") {
+        if (!Array.isArray(topics) || topics.length === 0) {
+          console.warn("No topics to render for chapter:", chapter);
+          return "<li>No topics found for this chapter.</li>";
+        }
+
         return topics
           .map((topic) => {
-            let topicHTML = "";
             if (typeof topic === "string") {
-              // This is a simple subtopic
-              topicHTML = `<li><a href="/subtopic/${encodeURIComponent(
+              return `<li><a href="/subtopic/${encodeURIComponent(
                 chapter
               )}/${encodeURIComponent(parentTopic)}/${encodeURIComponent(
                 topic
               )}" target="_blank">${topic}</a></li>`;
-            } else {
-              // This is a topic with potential nested subtopics
-              topicHTML = `<li><strong><a href="/topic/${encodeURIComponent(
+            } else if (topic && typeof topic === "object") {
+              let topicHTML = `<li><strong><a href="/topic/${encodeURIComponent(
                 chapter
-              )}/${encodeURIComponent(topic.topic)}" target="_blank">${
-                topic.topic
+              )}/${encodeURIComponent(
+                topic.topic || "Unnamed Topic"
+              )}" target="_blank">${
+                topic.topic || "Unnamed Topic"
               }</a></strong>`;
-              if (topic.sub_topics && topic.sub_topics.length > 0) {
-                topicHTML += `<ul>`;
-                topicHTML += renderTopics(
+              if (
+                topic.sub_topics &&
+                Array.isArray(topic.sub_topics) &&
+                topic.sub_topics.length > 0
+              ) {
+                topicHTML += `<ul>${renderTopics(
                   topic.sub_topics,
                   chapter,
-                  topic.topic
-                );
-                topicHTML += `</ul>`;
+                  topic.topic || "Unnamed Topic"
+                )}</ul>`;
               }
               topicHTML += `</li>`;
+              return topicHTML;
+            } else {
+              console.warn("Invalid topic object:", topic);
+              return "";
             }
-            return topicHTML;
           })
           .join("");
       }
