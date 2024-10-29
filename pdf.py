@@ -1,349 +1,367 @@
 import json
 import os
-from pathlib import Path
 import re
-from typing import Dict, Optional, List
+import logging
+from pathlib import Path
+from typing import Dict, Optional, List, Any, TypedDict, Union
 import google.generativeai as genai
-from google.generativeai.types.file_types import File
 from google.generativeai.types import GenerationConfig
-from dotenv import load_dotenv
+from google.generativeai.types.file_types import File as GeminiFile
+from datetime import datetime, timezone
+from google.generativeai import protos
 import fitz  # PyMuPDF
-import hashlib
-import shutil
 
-load_dotenv()
-
-# Configure the API key for Google Gemini
-genai.configure(api_key=os.environ["GEMINI_API_KEY"])
-
-# Initialize the model once to avoid recreating it
-# we will put this in class init function later on
-model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+logger = logging.getLogger(__name__)
 
 
-def upload_to_gemini(path: Path, mime_type: Optional[str] = None) -> File:
-    """Uploads file to Gemini.
-
-    Args:
-        path (Path): file path
-        mime_type (Optional[str], optional): mime type of the file. Defaults to None.
-
-    Returns:
-        File: File object
-    """
-    file = genai.upload_file(path, mime_type=mime_type)
-    print(f"Uploaded file '{file.display_name}' as: {file}")
-    return file
+class SubtopicDict(TypedDict):
+    name: str
+    subtopics: Optional[List["SubtopicDict"]]
 
 
-def extract_images_from_pdf(pdf_path: Path, output_folder: Path) -> List[str]:
-    """Extracts images from PDF and saves them to a file-specific folder.
-
-    Args:
-        pdf_path (Path): PDF file path
-        output_folder (Path): Output folder path
-
-    Returns:
-        List[str]: List of image file paths
-    """
-    pdf_name = pdf_path.stem
-    with open(pdf_path, "rb") as f:
-        pdf_hash = hashlib.md5(f.read()).hexdigest()[:8]
-
-    file_specific_folder = output_folder / f"{pdf_name}_{pdf_hash}"
-
-    # Remove the existing folder if it exists
-    if file_specific_folder.exists():
-        shutil.rmtree(file_specific_folder)
-
-    file_specific_folder.mkdir(parents=True, exist_ok=True)
-
-    doc = fitz.open(pdf_path)
-    image_files = []
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        image_list = page.get_images(full=True)
-
-        # Extract images from the page
-        for img_index, img in enumerate(image_list):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-
-            # Use a consistent naming scheme
-            image_filename = (
-                file_specific_folder / f"page_{page_num+1}_img_{img_index+1}.png"
-            )
-
-            with open(image_filename, "wb") as image_file:
-                image_file.write(image_bytes)
-
-            image_files.append(str(image_filename))
-
-        # Check if there are other XObjects (like images) on the page
-        try:
-            xobjects = page.get_xobjects()
-            if isinstance(xobjects, list):
-                for obj in xobjects:
-                    if "/Image" in obj:
-                        base_image = doc.extract_image(obj["xref"])
-                        image_bytes = base_image["image"]
-                        image_filename = (
-                            file_specific_folder
-                            / f"page_{page_num+1}_xobj_{obj['xref']}.png"
-                        )
-                        with open(image_filename, "wb") as image_file:
-                            image_file.write(image_bytes)
-
-                        image_files.append(str(image_filename))
-        except Exception as e:
-            print(f"Error extracting xobjects from page {page_num}: {e}")
-
-    doc.close()
-    return image_files
+class TopicDict(TypedDict):
+    name: str
+    subtopics: List[SubtopicDict]
 
 
-def generate_topics(file: File) -> List[Dict]:
-    """Generates chapters, topics, and subtopics from the book.
+class ChapterDict(TypedDict):
+    name: str
+    topics: List[TopicDict]
 
-    Args:
-        file (File): File object
 
-    Returns:
-        List[Dict]: List of dictionaries containing chapters, topics, and subtopics
-    """
+class PDFStructure(TypedDict):
+    chapters: List[ChapterDict]
 
-    generation_config = GenerationConfig(
-        temperature=1,
-        top_p=0.95,
-        top_k=64,
-        max_output_tokens=8192,
-    )
 
-    model = genai.GenerativeModel(
-        model_name="gemini-1.5-flash",
-        system_instruction="""
-
-        You are designated as an expert text analyst specializing in content organization and summarization. Your primary task is to dissect and organize book content into a structured format comprising chapters, main topics, and subtopics. Adhere to the following directives:
-
-        1. Reading Comprehension: Thoroughly read and understand the content of the provided book or document.
-        2. Content Breakdown: Identify and delineate the chapters first, followed by the main topics within each chapter, and further break these down into their respective subtopics.
-        3. Distinctiveness and Comprehensiveness: Ensure that each chapter and topic is distinct, comprehensive, and reflective of the book's overarching content.
-        4. Subtopic Clarity: Formulate clear and concise subtopics that logically fit under each main topic.
-        5. Consistency: Maintain a uniform level of detail across all chapters, topics, and subtopics.
-        6. Accuracy Verification: Perform cross-checks to validate the accuracy and completeness of your analysis.
-        7. Data Structuring: Organize the structured data in the JSON format as illustrated below:
-            ```json
-            [
+class NoteGenerator:
+    def __init__(self):
+        # Configure the API key for Google Gemini
+        genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+        self.model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            generation_config=GenerationConfig(
+                temperature=0.3,
+                top_p=0.8,
+                top_k=40,
+                max_output_tokens=8192,
+                response_mime_type="text/plain",
+            ),
+            safety_settings=[
                 {
-                    "chapter": "Chapter 1: Chapter Title",
-                    "topics": [
-                        {
-                            "topic": "Main Topic 1",
-                            "sub_topics": ["Subtopic 1A", "Subtopic 1B", "Subtopic 1C"]
-                        },
-                        {
-                            "topic": "Main Topic 2",
-                            "sub_topics": ["Subtopic 2A", "Subtopic 2B"]
-                        }
-                    ]
+                    "category": "HARM_CATEGORY_DANGEROUS",
+                    "threshold": "BLOCK_NONE",
                 },
                 {
-                    "chapter": "Chapter 2: Chapter Title",
-                    "topics": [
-                        // ... similar structure as Chapter 1
-                    ]
-                }
-            ]
-            ```
-        8. Meaningful Labeling: Ensure all names for chapters, topics, and subtopics are short, meaningful and informative.
-        9. Handling Complexity: If a topic presents a complex structure, incorporate nested subtopics as necessary.
-        10. Balance Detail and Brevity: Strike a balance between providing sufficient detail and maintaining brevity in your outline.
-        11. Content Relevance: Create subtopics or topics only if there is sufficient context provided in the book. Do not derive new subtopics or topics with no content foundation in the text.
-        12. Problem-Solving: In case of ambiguities or categorization difficulties, briefly explain your reasoning after the JSON output.
-        13. Review and Validation: Thoroughly review your output to ensure accuracy, consistency, and correct JSON formatting before submission.
-        14. Do not create any subtopics or topics if there is no context about them in the book.
-        15. You can use book's table of contents to create chapters, topics, and subtopics.
-        16. Do not include references and citations in the output.
-        17. If you think there is no context for a topic, then do not derive any subtopics for that topic.
-        18. If you think there is no context for a subtopic, you can skip it.
-        
-        """,
-        generation_config=generation_config,
-    )
+                    "category": "HARM_CATEGORY_HARASSMENT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_HATE_SPEECH",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE",
+                },
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_NONE",
+                },
+            ],
+        )
 
-    response = model.generate_content(
-        [
-            file,
-            "Give me chapters, topics, and subtopics from this book.Make sure topics and subtopics are not created if there is no context in the book. And Make sure to follow the instructions strictly.",
-        ]
-    ).text
-
-    print(f"Response: {response}")
-
-    # Extract the JSON data from the response
-    match = re.search(r"```json\n(.*?)\n```", response, re.DOTALL)
-    if match:
-        json_data = match.group(1)
+    def upload_to_gemini(
+        self, path: Path, mime_type: Optional[str] = None
+    ) -> GeminiFile:
+        """Uploads file to Gemini."""
         try:
-            parsed_data = json.loads(json_data)
-            # Return chapters as a list of dictionaries
-            return parsed_data
-        except json.JSONDecodeError as e:
-            print(f"Error parsing JSON: {e}")
-            return []
-    else:
-        return []
+            file = genai.upload_file(path, mime_type=mime_type)
+            logger.info(f"Uploaded file '{file.display_name}' to Gemini")
+            return file
+        except Exception as e:
+            logger.error(f"Error uploading file to Gemini: {str(e)}")
+            raise
 
+    def generate_topic_notes(
+        self, gemini_file: GeminiFile, chapter: str, topic: str, image_files: List[str]
+    ) -> Dict:
+        """Generate comprehensive notes for a topic."""
+        try:
+            print(f"gemini_file: {gemini_file}")
+            print(f"chapter: {chapter}")
+            print(f"topic: {topic}")
+            print(f"image_files: {image_files}")
+            logger.info(f"Generating notes for topic: {chapter}/{topic}")
 
-def generate_subtopic_notes(
-    chapter: str, topic: str, sub_topic: str, file_path: Path, image_files: List[str]
-) -> Dict:
-    """Generate notes for each chapter, topic and subtopic, and select relevant images with captions.
+            prompt = f"""Analyze the PDF content and generate comprehensive notes for the topic '{topic}' 
+            from chapter '{chapter}'. Focus on:
+            1. Key concepts and main ideas
+            2. Important definitions and terminology
+            3. Examples and applications
+            4. Relationships to other concepts
 
-    Args:
-        chapter (str): Chapter name
-        topic (str): Topic name
-        sub_topic (str): Subtopic name
-        file_path (Path): File path
-        image_files (List[str]): List of image file paths
-
-    Returns:
-        Dict: Dictionary containing notes and images
-    """
-    file = upload_to_gemini(file_path)
-
-    # Create a prompt that includes information about available images
-    image_prompt = "\n".join(image_files)
-
-    response = model.generate_content(
-        [
-            file,
-            f"""Generate comprehensive notes on the subtopic '{sub_topic}' under the topic '{topic}' in the chapter '{chapter}'. 
-            Start directly with the content for '{sub_topic}' without repeating the chapter or topic names. 
             Also, select only the relevant images for the content you mentioned in the notes.
             If no image is relevant, don't include any image.
             
             For each selected image, extract the caption from the file.
-            
-            Format your response as a JSON object with the following structure:
-            
+
+            Available images: {', '.join(image_files)}
+
+            Format the response as a JSON object with 'notes' in markdown format and relevant 'images':
             ```json
             {{
-                "notes": "The comprehensive notes for the subtopic",
+                "notes": "[Markdown formatted notes here Start directly with the content for '{topic}' without repeating the chapter or topic names. ]",
                 "images": [
-                    {{
-                        "filename": "image1.png",
-                        "caption": "Extract the caption of image1 from the file."
-                    }},
-                    {{
-                        "filename": "image2.png",
-                        "caption": "Extract the caption of image2 from the file."
-                    }}
+                    {{"filename": "image1.jpg", "caption": "extract the caption from the file"}}
                 ]
             }}
             ```
             
-            Available images:
-            {image_prompt}
-            """,
-        ]
-    ).text
+            Make the notes clear, well-structured, and easy to understand. properly format the output in JSON.
+            """
 
-    print(f"Response: {response}")
-    match = re.search(r"```json\n(.*?)\n```", response, re.DOTALL)
-    if match:
-        json_data = match.group(1)
+            response = self.model.generate_content([gemini_file, prompt]).text
+            return self._parse_json_response(response)
+        except Exception as e:
+            logger.error(f"Error generating topic notes: {str(e)}")
+            raise
+
+    def generate_subtopic_notes(
+        self,
+        gemini_file: GeminiFile,
+        chapter: str,
+        topic: str,
+        subtopic: str,
+        image_files: List[str],
+    ) -> Dict:
+        """Generate detailed notes for a subtopic."""
         try:
-            result = json.loads(json_data)
-            return result
-        except json.JSONDecodeError:
-            print(f"Error parsing JSON response: {response}")
-            return {"notes": "Error generating notes", "images": []}
-    else:
-        print("No JSON data found in the response")
-        return {"notes": "Error generating notes", "images": []}
+            logger.info(f"Generating notes for subtopic: {chapter}/{topic}/{subtopic}")
 
+            prompt = f"""Analyze the PDF content and generate detailed notes for the subtopic '{subtopic}' 
+            under topic '{topic}' from chapter '{chapter}'. Focus on:
+            1. Detailed explanation of the subtopic
+            2. Specific examples and use cases
+            3. Technical details and implementation aspects
+            4. Common challenges or misconceptions
 
-def generate_topic_notes(
-    file: File, chapter: str, topic: str, image_files: List[str]
-) -> Dict:
-    """Generate notes and select images with captions for the topic.
-
-    Args:
-        file (File): File object
-        chapter (str): Chapter name
-        topic (str): Topic name
-        image_files (List[str]): List of image file paths
-
-    Returns:
-        Dict: Dictionary containing notes and images
-    """
-    image_prompt = "\n".join(image_files)
-
-    response = model.generate_content(
-        [
-            file,
-            f"""Generate a comprehensive overview of the topic '{topic}' in the chapter '{chapter}'. 
-            Include key concepts and main ideas. Also, select only the relevant images for the content you mentioned in the notes.
+            Also, select only the relevant images for the content you mentioned in the notes.
             If no image is relevant, don't include any image.
             
             For each selected image, extract the caption from the file.
-            
-            Format your response as a JSON object with the following structure:
-            ```json
+
+            Available images: {', '.join(image_files)}
+
+            Return a valid JSON object with the following structure:
             {{
-                "notes": "The comprehensive notes for the topic",
+                "notes": "[Markdown formatted notes here Start directly with the content for '{subtopic}' without repeating the chapter or topic names. ]",
                 "images": [
-                    {{
-                        "filename": "image1.png",
-                        "caption": "Extract the caption of image1 from the file."
-                    }},
-                    {{
-                        "filename": "image2.png",
-                        "caption": "Extract the caption of image2 from the file."
-                    }}
+                    {{"filename": "image1.jpg", "caption": "Caption text"}}
                 ]
             }}
-            
-            Available images:
-            {image_prompt}
-            """,
-        ]
-    ).text
 
-    print(f"Response: {response}")
+            Important:
+            1. Start the notes content directly without repeating chapter/topic names
+            2. Use proper markdown formatting
+            3. Ensure the JSON is properly formatted and valid
+            4. Do not include any explanation text outside the JSON structure
+            """
 
-    match = re.search(r"```json\n(.*?)\n```", response, re.DOTALL)
-    if match:
-        json_data = match.group(1)
+            response = self.model.generate_content(
+                [gemini_file, prompt],
+                generation_config=GenerationConfig(
+                    temperature=0.3,
+                    top_p=0.8,
+                    top_k=40,
+                    max_output_tokens=8192,
+                ),
+            ).text
+
+            # Clean the response to ensure valid JSON
+            cleaned_response = self._clean_json_response(response)
+            return json.loads(cleaned_response)
+
+        except Exception as e:
+            logger.error(f"Error generating subtopic notes: {str(e)}")
+            return {"notes": f"Error generating notes: {str(e)}", "images": []}
+
+    def _clean_json_response(self, response: str) -> str:
+        """Clean the response to ensure valid JSON."""
         try:
-            result = json.loads(json_data)
-            return result
-        except json.JSONDecodeError:
-            print(f"Error parsing JSON response: {response}")
-            return {"notes": "Error generating notes", "images": []}
-    else:
-        print("No JSON data found in the response")
-        return {"notes": "Error generating notes", "images": []}
+            # Find the first { and last } to extract the JSON object
+            start = response.find("{")
+            end = response.rfind("}") + 1
+            if start == -1 or end == 0:
+                raise ValueError("No JSON object found in response")
 
+            json_str = response[start:end]
 
-def generate_quiz(file: File, chapter: str) -> List[Dict]:
-    """Generate quiz questions for a specific chapter.
+            # Remove any markdown code block markers
+            json_str = json_str.replace("```json", "").replace("```", "")
 
-    Args:
-        file (File): File object
-        chapter (str): Chapter name
+            # Validate the JSON
+            json.loads(json_str)  # This will raise an exception if invalid
+            return json_str
 
-    Returns:
-        List[Dict]: List of dictionaries containing quiz questions
-    """
-    print(f"Generating quiz for chapter: {chapter}")
-    response = model.generate_content(
-        [
-            file,
-            f"""Generate a comprehensive multiple-choice quiz for the chapter '{chapter}' following these specifications:
+        except Exception as e:
+            logger.error(f"Error cleaning JSON response: {str(e)}")
+            raise
+
+    def extract_pdf_structure(self, gemini_file: GeminiFile) -> Dict[str, Any]:
+        """Extract the structure of chapters and topics from the PDF."""
+        try:
+            model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash",
+                generation_config=GenerationConfig(
+                    temperature=0.3,
+                    top_p=0.8,
+                    top_k=40,
+                    max_output_tokens=8192,
+                ),
+                system_instruction="""
+You are designated as an expert text analyst specializing in content organization and summarization. Your primary task is to dissect and organize book content into a structured format comprising chapters, main topics, and subtopics. Adhere to the following directives:
+
+                1. Reading Comprehension: Thoroughly read and understand the content of the provided book or document.
+                2. Content Breakdown: Identify and delineate the chapters first, followed by the main topics within each chapter, and further break these down into their respective subtopics.
+                3. Distinctiveness and Comprehensiveness: Ensure that each chapter and topic is distinct, comprehensive, and reflective of the book's overarching content.
+                4. Subtopic Clarity: Formulate clear and concise subtopics that logically fit under each main topic.
+                5. Consistency: Maintain a uniform level of detail across all chapters, topics, and subtopics.
+                6. Accuracy Verification: Perform cross-checks to validate the accuracy and completeness of your analysis.
+                7. Data Structuring: Organize the structured data in the JSON format as illustrated below:
+                    ```json
+                    {
+                        "chapters": [
+                            {
+                                "name": "Chapter 1: Introduction",
+                                "topics": [
+                                    {
+                                        "name": "Topic 1.1",
+                                        "subtopics": [
+                                            {
+                                                "name": "Subtopic 1.1.1",
+                                                "subtopics": ["Inner Subtopic 1", "Inner Subtopic 2"]
+                                            },
+                                            {
+                                                "name": "Subtopic 1.1.2"
+                                            }
+                                        ]
+                                    },
+                                    {
+                                        "name": "Topic 1.2"
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "Chapter 2: Chapter Title"
+                            }
+                        ]
+                    }
+                    ```
+                8. Meaningful Labeling: Ensure all names for chapters, topics, and subtopics are short, meaningful and informative.
+                9. Handling Complexity: If a topic presents a complex structure, incorporate nested subtopics as necessary.
+                10. Balance Detail and Brevity: Strike a balance between providing sufficient detail and maintaining brevity in your outline.
+                11. Content Relevance: Create subtopics or topics only if there is sufficient context provided in the book. Do not derive new subtopics or topics with no content foundation in the text.
+                12. Problem-Solving: In case of ambiguities or categorization difficulties, briefly explain your reasoning after the JSON output.
+                13. Review and Validation: Thoroughly review your output to ensure accuracy, consistency, and correct JSON formatting before submission.
+                14. Do not create any subtopics or topics if there is no context about them in the book.
+                15. You can use book's table of contents to create chapters, topics, and subtopics.
+                16. Do not include references and citations in the output.
+                17. If you think there is no context for a topic, then do not derive any subtopics for that topic.
+                18. If you think there is no context for a subtopic, you can skip it.
+
+""",
+            )
+            response = model.generate_content(
+                [
+                    gemini_file,
+                    "Give me chapters, topics, and subtopics from this book.Make sure topics and subtopics are not created if there is no context in the book. And Make sure to follow the instructions strictly.",
+                ]
+            )
+
+            # Parse and validate the structure
+            structure = self._parse_json_response(response.text)
+            self._validate_structure(structure)
+
+            return structure
+
+        except Exception as e:
+            logger.error(f"Error extracting PDF structure: {str(e)}")
+            raise
+
+    def _validate_structure(self, structure: Dict) -> PDFStructure:
+        """Validate the PDF structure format and clean any nested objects."""
+        if not isinstance(structure, dict) or "chapters" not in structure:
+            raise ValueError("Invalid structure: missing 'chapters' key")
+
+        def clean_name(item: Any) -> str:
+            """Convert any name object to string."""
+            if isinstance(item, dict):
+                return str(item.get("name", ""))
+            return str(item)
+
+        def process_subtopics(subtopics_list: List[Any]) -> List[SubtopicDict]:
+            """Process subtopics recursively maintaining structure."""
+            cleaned_subtopics: List[SubtopicDict] = []
+            for subtopic in subtopics_list:
+                if isinstance(subtopic, dict):
+                    cleaned_subtopic: SubtopicDict = {
+                        "name": clean_name(subtopic["name"]),
+                        "subtopics": [],  # Initialize with empty list
+                    }
+                    # Handle nested subtopics recursively
+                    if "subtopics" in subtopic and subtopic["subtopics"]:
+                        cleaned_subtopic["subtopics"] = process_subtopics(
+                            subtopic["subtopics"]
+                        )
+                    cleaned_subtopics.append(cleaned_subtopic)
+                else:
+                    cleaned_subtopics.append(
+                        {"name": clean_name(subtopic), "subtopics": []}
+                    )
+            return cleaned_subtopics
+
+        # Clean and validate chapters
+        cleaned_structure: PDFStructure = {"chapters": []}
+
+        for chapter in structure["chapters"]:
+            if not isinstance(chapter, dict):
+                raise ValueError("Invalid chapter format")
+
+            cleaned_chapter: ChapterDict = {
+                "name": clean_name(chapter["name"]),
+                "topics": [],
+            }
+
+            # Clean and validate topics
+            if "topics" in chapter:
+                for topic in chapter["topics"]:
+                    if not isinstance(topic, dict):
+                        raise ValueError("Invalid topic format")
+
+                    cleaned_topic: TopicDict = {
+                        "name": clean_name(topic["name"]),
+                        "subtopics": [],
+                    }
+
+                    # Clean and validate subtopics
+                    if "subtopics" in topic:
+                        cleaned_topic["subtopics"] = process_subtopics(
+                            topic["subtopics"]
+                        )
+
+                    cleaned_chapter["topics"].append(cleaned_topic)
+
+            cleaned_structure["chapters"].append(cleaned_chapter)
+
+        logger.info("Structure validation and cleaning completed successfully")
+        return cleaned_structure
+
+    def generate_quiz_questions(
+        self, gemini_file: GeminiFile, chapter: str
+    ) -> List[Dict]:
+        """Generate quiz questions for a chapter."""
+        try:
+            prompt = f"""Generate a comprehensive multiple-choice quiz for the chapter '{chapter}' following these specifications:
 
             Structure:
             - Total questions: 15 questions only.
@@ -370,57 +388,163 @@ def generate_quiz(file: File, chapter: str) -> List[Dict]:
             - Avoid options with long length.
             - Maintain consistent formatting across all options
 
-                        
-            ```json
+
+            Format the response as a JSON array of questions:
             [
-                {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A"}},
-                {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A"}},
-                {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A"}},
-                {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A"}},
-                {{"question": "...", "options": ["A. ...", "B. ...", "C. ...", "D. ..."], "correct_answer": "A"}}
+                {{
+                    "question": "Question text here?",
+                    "options": [
+                        "A. First option",
+                        "B. Second option",
+                        "C. Third option",
+                        "D. Fourth option"
+                    ],
+                    "correct_answer": "A",
+                    "explanation": "Explanation of the correct answer"
+                }}
             ]
-            ```
-            """,
-        ]
-    ).text
 
-    # Extract the JSON data from the response
-    match = re.search(r"```json\n(.*?)\n```", response, re.DOTALL)
-    if match:
-        json_data = match.group(1)
+            Ensure each question:
+            1. Tests understanding, not just memorization
+            2. Has exactly 4 options labeled A through D
+            3. Has one clear correct answer
+            4. Includes an explanation for the correct answer
+            5. A total of 15 questions only.
+            """
+
+            response = self.model.generate_content([gemini_file, prompt]).text
+            questions = self._parse_json_response(response)
+
+            # Validate that we got a list of questions
+            if not isinstance(questions, list):
+                raise ValueError("Invalid quiz format: expected list of questions")
+
+            return questions
+
+        except Exception as e:
+            logger.error(f"Error generating quiz questions: {str(e)}")
+            raise
+
+    def _parse_json_response(self, response: str) -> Dict:
+        """Parse JSON response from Gemini."""
         try:
-            parsed_data = json.loads(json_data)
-            print(f"Parsed quiz data: {parsed_data}")
-            if not parsed_data:  # If parsed_data is empty, use fallback
-                return fallback_quiz_questions(chapter)
-            return parsed_data
+            # First try to find JSON within code blocks
+            match = re.search(r"```(?:json)?\n(.*?)\n```", response, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                # If no code blocks found, try to parse the entire response
+                json_str = response
+
+            # Clean up the string
+            json_str = json_str.strip()
+
+            # Parse JSON
+            result = json.loads(json_str)
+
+            logger.info(f"Successfully parsed JSON structure: {result}")
+            return result
+
         except json.JSONDecodeError as e:
-            print(f"Error parsing JSON: {e}")
-            return fallback_quiz_questions(chapter)
-    else:
-        print("No JSON data found in the response")
-        return fallback_quiz_questions(chapter)
+            logger.error(f"Error parsing JSON response: {str(e)}")
+            logger.error(f"Raw response: {response}")
+            raise ValueError(f"Failed to parse JSON response: {str(e)}")
 
+    def create_gemini_file_dict(self, gemini_file: GeminiFile) -> Dict:
+        """Create a dictionary of Gemini file information for storage."""
+        return {
+            "name": gemini_file.name,
+            "display_name": gemini_file.display_name,
+            "mime_type": gemini_file.mime_type,
+            "sha256_hash": (
+                gemini_file.sha256_hash.decode("utf-8")
+                if isinstance(gemini_file.sha256_hash, bytes)
+                else gemini_file.sha256_hash
+            ),
+            "size_bytes": str(gemini_file.size_bytes),
+            "state": gemini_file.state,
+            "uri": gemini_file.uri,
+            "create_time": (
+                gemini_file.create_time.isoformat() if gemini_file.create_time else None
+            ),
+            "expiration_time": (
+                gemini_file.expiration_time.isoformat()
+                if gemini_file.expiration_time
+                else None
+            ),
+            "update_time": (
+                gemini_file.update_time.isoformat() if gemini_file.update_time else None
+            ),
+        }
 
-def fallback_quiz_questions(chapter: str) -> List[Dict]:
-    """Generate fallback quiz questions if the AI model fails to generate quiz questions.
+    def reconstruct_gemini_file(self, stored_file: Dict) -> GeminiFile:
+        """Reconstruct a Gemini file object from stored data."""
+        try:
+            file_proto = protos.File(
+                name=stored_file["name"],
+                display_name=stored_file["display_name"],
+                mime_type=stored_file["mime_type"],
+                sha256_hash=stored_file["sha256_hash"].encode("utf-8"),
+                size_bytes=int(stored_file["size_bytes"]),
+                state=stored_file["state"],
+                uri=stored_file["uri"],
+                create_time=stored_file["create_time"],
+                expiration_time=stored_file["expiration_time"],
+                update_time=stored_file["update_time"],
+            )
+            return GeminiFile(proto=file_proto)
+        except Exception as e:
+            logger.error(f"Error reconstructing Gemini file: {str(e)}")
+            raise
 
-    Args:
-        chapter (str): Chapter name
+    def extract_images_from_pdf(self, pdf_path: Path, output_folder: Path) -> List[str]:
+        """Extract images from PDF and save them."""
+        doc = None  # Initialize doc outside try block
+        try:
+            doc = fitz.open(pdf_path)
+            image_files = []
 
-    Returns:
-        List[Dict]: List of dictionaries containing quiz questions
-    """
-    return [
-        {
-            "question": f"This is a sample question about {chapter}. What is the correct answer?",
-            "options": [
-                "A. Sample answer 1",
-                "B. Sample answer 2",
-                "C. Sample answer 3",
-                "D. Sample answer 4",
-            ],
-            "correct_answer": "A",
-        },
-        # Add more fallback questions here...
-    ]
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                image_list = page.get_images()
+
+                for img_index, img in enumerate(image_list):
+                    try:
+                        xref = img[0]
+                        base_image = doc.extract_image(xref)
+
+                        if base_image:
+                            image_bytes = base_image["image"]
+                            image_ext = base_image["ext"]
+
+                            # Generate a unique name for each image
+                            image_name = (
+                                f"image_{page_num + 1}_{img_index + 1}.{image_ext}"
+                            )
+                            image_path = output_folder / image_name
+
+                            # Save the image
+                            with open(image_path, "wb") as f:
+                                f.write(image_bytes)
+
+                            logger.info(f"Saved image: {image_name}")
+                            image_files.append(image_name)
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to extract image {img_index} from page {page_num}: {str(e)}"
+                        )
+                        continue
+
+            logger.info(
+                f"Successfully extracted {len(image_files)} images from {pdf_path}"
+            )
+            return image_files
+
+        except Exception as e:
+            logger.error(f"Error extracting images from PDF: {str(e)}")
+            raise
+
+        finally:
+            if doc is not None:  # Check if doc was initialized
+                doc.close()

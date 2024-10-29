@@ -35,54 +35,73 @@
           Here's a breakdown of the key concepts:
         </h3>
         <div id="topicNotes" class="notes-content">
+          {% if notes %} {{ notes | safe }} {% else %}
           <div class="text-center">
             <div class="spinner-border" role="status">
               <span class="visually-hidden">Loading...</span>
             </div>
             <p>Loading notes...</p>
           </div>
+          {% endif %}
         </div>
         <div id="topicImage" class="mt-3"></div>
       </div>
     </div>
 
     <script>
+      const chapter = decodeURIComponent("{{ chapter }}");
+      const topic = decodeURIComponent("{{ topic }}");
+
       async function loadTopicNotes() {
         try {
           const response = await fetch(
-            `/api/topic_notes/{{ chapter | urlencode }}/{{ topic | urlencode }}`
+            `/api/topic_notes/${encodeURIComponent(
+              chapter
+            )}/${encodeURIComponent(topic)}`
           );
-          if (response.ok) {
-            const data = await response.json();
-            console.log("Received data:", data); // Log the received data
-            if (data.error) {
-              document.getElementById(
-                "chapterOverview"
-              ).innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
-              document.getElementById("topicNotes").innerHTML = "";
-            } else {
-              // Use marked to convert markdown to HTML
-              document.getElementById("topicNotes").innerHTML = marked.parse(
-                data.topic_notes
-              );
-              if (data.images && data.images.length > 0) {
-                const imagesHTML = data.images
-                  .map(
-                    (image, index) => `
-                      <figure class="figure">
-                        <img src="/images/${data.username}/images/${data.pdf_folder}/${image.filename}" alt="Topic image" class="img-fluid mb-2">
-                        <figcaption class="figure-caption text-center">${image.caption}</figcaption>
-                      </figure>
-                    `
-                  )
-                  .join("");
-                document.getElementById("topicImage").innerHTML = imagesHTML;
-              } else {
-                document.getElementById("topicImage").innerHTML = ""; // Clear the image div if no images
-              }
-            }
-          } else {
+          console.log("API Response status:", response.status);
+
+          // Check for authentication error first
+          if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+
+          if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const data = await response.json();
+          console.log("Received data:", data);
+
+          if (data.error) {
+            document.getElementById(
+              "chapterOverview"
+            ).innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+            document.getElementById("topicNotes").innerHTML = "";
+          } else {
+            document.getElementById("topicNotes").innerHTML = marked.parse(
+              data.notes
+            );
+
+            // Handle images if they exist
+            if (data.images && data.images.length > 0) {
+              const imagesHTML = data.images
+                .map(
+                  (image) => `
+                    <figure class="figure">
+                      <img src="/images/${data.username}/images/${data.pdf_folder}/${image.filename}" 
+                           alt="Topic image" 
+                           class="img-fluid mb-2">
+                      <figcaption class="figure-caption text-center">${image.caption}</figcaption>
+                    </figure>
+                  `
+                )
+                .join("");
+              document.getElementById("topicImage").innerHTML = imagesHTML;
+            } else {
+              document.getElementById("topicImage").innerHTML = "";
+            }
           }
         } catch (error) {
           console.error("Error loading topic notes:", error);
@@ -93,7 +112,7 @@
         }
       }
 
-      // Load the notes when the page loads
+      // Always load notes on page load
       window.onload = loadTopicNotes;
     </script>
 
