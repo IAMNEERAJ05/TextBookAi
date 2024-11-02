@@ -1,18 +1,32 @@
-from fastapi.responses import HTMLResponse
+import logging
 from fastapi import (
     FastAPI,
     Request,
     UploadFile,
-    File,
+    File as FastAPIFile,
+    HTTPException,
+    Form,
+    status,
+    Depends,
 )
-from starlette.requests import Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
-from fastapi.staticfiles import StaticFiles
 
+from pdf import NoteGenerator
+from services import NoteService, UserService, FileService
+from file_utils import save_uploaded_file
+from db import DatabaseManager
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Load environment variables
 load_dotenv()
 
 # Initialize FastAPI app
@@ -21,11 +35,7 @@ app.add_middleware(SessionMiddleware, secret_key="your-secret-key")
 
 # Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-# Add session middleware (from starlette)
-app.add_middleware(SessionMiddleware, secret_key="your_secret_key_here")
-
-# Set up Jinja2 templates
+app.mount("/images", StaticFiles(directory="uploads"), name="images")
 templates = Jinja2Templates(directory="templates")
 
 # Initialize services
@@ -315,24 +325,6 @@ async def quiz_page(request: Request, chapter: str):
     )
 
 
-def check_existing_pdf(pdf_path: str) -> bool:
-    """Check if a PDF already exists in the database by its path."""
-    conn = get_db_connection()
-    if not conn:
-        return False
-
-    try:
-        with conn.cursor() as cursor:
-            query = "SELECT * FROM pdfs WHERE pdf_path = %s;"
-            cursor.execute(query, (pdf_path,))
-            return cursor.fetchone() is not None
-    except psycopg2.Error as e:
-        print(f"Error checking PDF existence: {e}")
-    finally:
-        conn.close()
-    return False
-
-
 @app.get("/api/quiz/{chapter}")
 async def get_quiz(request: Request, chapter: str, new: bool = False):
     """Get quiz questions for a chapter."""
@@ -390,64 +382,76 @@ async def get_quiz(request: Request, chapter: str, new: bool = False):
     except Exception as e:
         logger.error(f"Error generating quiz: {str(e)}")
         return JSONResponse(
-            content={"error": "Invalid file type. Please upload a PDF file."},
-            status_code=400,
+            content={"error": "Failed to generate quiz"}, status_code=500
         )
 
-    # Ensure the upload folder exists
-    upload_folder = Path("uploads")
-    upload_folder.mkdir(exist_ok=True)
 
-    # Save the file locally
-    file_path = upload_folder / os.path.basename(str(file.filename))
-    with file_path.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    # Upload the file to Gemini and store its URI in the session
-    uploaded_file = upload_to_gemini(file_path)
-
-    # Store only the file name in the session
-    request.session["uploaded_file_name"] = file_path.name
-
-    # Generate topics after file upload
-    topics = generate_topics(uploaded_file)
-
-    return {"message": "File uploaded", "file_name": file_path.name, "topics": topics}
-
-
-@app.get("/notes/")
-async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
-    """Generate notes for the subtopic and render the notes.html template."""
-    file_name = request.session.get("uploaded_file_name")
-    if not file_name:
-        return HTMLResponse(
-            "No file found in session. Please upload a PDF.", status_code=400
-        )
-
-    # Retrieve the file from storage
-    file_path = Path("uploads") / file_name
-    if not file_path.exists():
-        return HTMLResponse(
-            "File not found in storage. Please upload the PDF again.", status_code=400
-        )
-
-    # Generate notes
+@app.get("/api/quiz/{quiz_id}/answers")
+async def get_quiz_answers(request: Request, quiz_id: int):
+    """Get answers for a completed quiz."""
     try:
-        notes = generate_notes(chapter, topic, subtopic, file_path)
-        if not notes.strip():
-            notes = "No notes generated for this subtopic."
-    except Exception as e:
-        logging.error(f"Error generating notes: {str(e)}")
-        notes = f"Error generating notes: {str(e)}"
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(
+                content={"error": "User not authenticated"}, status_code=401
+            )
 
-    # Render the template with the generated notes
-    return templates.TemplateResponse(
-        "notes.html",
-        {
-            "request": request,
-            "chapter": chapter,
-            "topic": topic,
-            "subtopic": subtopic,
-            "notes": notes,
-        },
-    )
+        answers = db.get_quiz_answers(quiz_id)
+        return JSONResponse(content={"answers": answers}, status_code=200)
+
+    except Exception as e:
+        logger.error(f"Error getting quiz answers: {str(e)}")
+        return JSONResponse(
+            content={"error": "Failed to get quiz answers"}, status_code=500
+        )
+
+
+@app.get("/book/{pdf_id}", response_class=HTMLResponse)
+async def book_page(request: Request, pdf_id: int):
+    """Render book structure page."""
+    try:
+        username = request.session.get("username")
+        if not username:
+            raise HTTPException(status_code=401, detail="User not authenticated")
+
+        # Get PDF info and structure
+        pdf_info = db.get_pdf_info(pdf_id)
+        if not pdf_info:
+            raise HTTPException(status_code=404, detail="PDF not found")
+
+        if pdf_info["username"] != username:
+            raise HTTPException(status_code=403, detail="Unauthorized")
+
+        structure = db.get_pdf_structure(pdf_id)
+
+        return templates.TemplateResponse(
+            "book.html",
+            {
+                "request": request,
+                "pdf_info": pdf_info,
+                "structure": structure,
+                "username": username,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error rendering book page: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/book/{pdf_id}")
+async def get_book_structure(pdf_id: int):
+    """Get book structure."""
+    try:
+        structure = db.get_pdf_structure(pdf_id)
+        return JSONResponse(content={"structure": structure})
+    except Exception as e:
+        logger.error(f"Error getting book structure: {str(e)}")
+        return JSONResponse(
+            content={"error": "Failed to get book structure"}, status_code=500
+        )
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
