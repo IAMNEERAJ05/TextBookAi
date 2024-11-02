@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/static/images/text-logo.png" />
+    <title>{{ topic }} Notes</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="/static/css/notes.css" />
+    <style>
+      .notes-container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .notes-content {
+        background-color: #f8f9fa;
+        padding: 20px;
+        border-radius: 5px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container custom-container">
+      <div class="notes-container">
+        <h1>Notes for {{ topic }}</h1>
+        <div id="chapterOverview" class="chapter-overview">
+          <!-- Chapter overview content will be inserted here if needed -->
+        </div>
+        <h3 class="key-concepts-title">
+          Here's a breakdown of the key concepts:
+        </h3>
+        <div id="topicNotes" class="notes-content">
+          {% if notes %} {{ notes | safe }} {% else %}
+          <div class="text-center">
+            <div class="spinner-border" role="status">
+              <span class="visually-hidden">Loading...</span>
+            </div>
+            <p>Loading notes...</p>
+          </div>
+          {% endif %}
+        </div>
+        <div id="topicImage" class="mt-3"></div>
+      </div>
+    </div>
+
+    <script>
+      const chapter = decodeURIComponent("{{ chapter }}");
+      const topic = decodeURIComponent("{{ topic }}");
+
+      async function loadTopicNotes() {
+        try {
+          const response = await fetch(
+            `/api/topic_notes/${encodeURIComponent(
+              chapter
+            )}/${encodeURIComponent(topic)}`
+          );
+          console.log("API Response status:", response.status);
+
+          // Check for authentication error first
+          if (response.status === 401) {
+            window.location.href = "/login";
+            return;
+          }
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          const data = await response.json();
+          console.log("Received data:", data);
+
+          if (data.error) {
+            document.getElementById(
+              "chapterOverview"
+            ).innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+            document.getElementById("topicNotes").innerHTML = "";
+          } else {
+            document.getElementById("topicNotes").innerHTML = marked.parse(
+              data.notes
+            );
+
+            // Handle images if they exist
+            if (data.images && data.images.length > 0) {
+              const imagesHTML = data.images
+                .map(
+                  (image) => `
+                    <figure class="figure">
+                      <img src="/images/${data.username}/images/${data.pdf_folder}/${image.filename}" 
+                           alt="Topic image" 
+                           class="img-fluid mb-2">
+                      <figcaption class="figure-caption text-center">${image.caption}</figcaption>
+                    </figure>
+                  `
+                )
+                .join("");
+              document.getElementById("topicImage").innerHTML = imagesHTML;
+            } else {
+              document.getElementById("topicImage").innerHTML = "";
+            }
+          }
+        } catch (error) {
+          console.error("Error loading topic notes:", error);
+          document.getElementById(
+            "chapterOverview"
+          ).innerHTML = `<div class="alert alert-danger">An error occurred while loading the notes: ${error.message}</div>`;
+          document.getElementById("topicNotes").innerHTML = "";
+        }
+      }
+
+      // Always load notes on page load
+      window.onload = loadTopicNotes;
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>

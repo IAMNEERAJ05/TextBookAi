@@ -47,27 +47,32 @@
           const loginValue = document.getElementById("login-field").value;
 
           // Determine if the input is an email or username
-          let loginMethod = "username"; // default to username
-          if (loginValue.includes("@")) {
-            // If it contains an "@", treat it as an email
-            loginMethod = "email";
-          }
+          const loginMethod = loginValue.includes("@") ? "email" : "username";
 
-          // Perform an AJAX request to the server for login
+          // Create FormData object
           const formData = new FormData(this);
-          formData.append("login_method", loginMethod); // Append login method
+          formData.append("login_method", loginMethod);
 
-          const response = await fetch(this.action, {
-            method: "POST",
-            body: formData,
-          });
+          try {
+            const response = await fetch("/login", {
+              method: "POST",
+              body: formData, // Send as FormData
+            });
 
-          if (!response.ok) {
-            // Show error message if the response is not okay
+            const data = await response.json();
+
+            if (response.ok) {
+              window.location.href = "/"; // Redirect to home page on success
+            } else {
+              document.getElementById("error-msg").style.display = "block";
+              document.getElementById("error-msg").textContent =
+                data.error || "Login failed";
+            }
+          } catch (error) {
+            console.error("Error:", error);
             document.getElementById("error-msg").style.display = "block";
-          } else {
-            // Redirect to the home page or wherever you want after a successful login
-            window.location.href = "/";
+            document.getElementById("error-msg").textContent =
+              "An error occurred during login";
           }
         });
     </script>

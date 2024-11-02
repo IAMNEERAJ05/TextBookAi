@@ -1,0 +1,109 @@
+body {
+  background-color: #f8f9fa;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  color: #34495e;
+}
+.custom-container {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 30px;
+}
+.notes-container {
+  background-color: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  padding: 30px;
+  margin-top: 30px;
+}
+.notes-container h1 {
+  color: #2c3e50;
+  margin-bottom: 20px;
+  font-weight: 600;
+  font-size: 28px;
+}
+.notes-container h2 {
+  color: #2c3e50;
+  margin-top: 25px;
+  margin-bottom: 15px;
+  font-weight: 600;
+  font-size: 24px;
+}
+.chapter-overview {
+  margin-bottom: 20px;
+}
+.key-concepts-title {
+  color: #2c3e50;
+  margin-top: 25px;
+  margin-bottom: 15px;
+  font-weight: 600;
+  font-size: 20px;
+}
+.notes-content {
+  font-size: 16px;
+  line-height: 1.6;
+}
+.notes-content ul,
+.notes-content ol {
+  padding-left: 25px;
+  margin-bottom: 15px;
+}
+.notes-content li {
+  margin-bottom: 12px;
+}
+.notes-content code {
+  background-color: #f1f3f5;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-family: "Courier New", Courier, monospace;
+}
+.notes-content pre {
+  background-color: #f1f3f5;
+  padding: 15px;
+  border-radius: 4px;
+  overflow-x: auto;
+  margin-bottom: 20px;
+}
+.notes-content blockquote {
+  border-left: 4px solid #3498db;
+  padding-left: 15px;
+  margin-left: 0;
+  color: #7f8c8d;
+}
+.notes-content img {
+  max-width: 100%;
+  height: auto;
+  margin: 15px 0;
+}
+.notes-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 20px;
+}
+.notes-content th,
+.notes-content td {
+  border: 1px solid #ddd;
+  padding: 8px;
+  text-align: left;
+}
+.notes-content th {
+  background-color: #f2f2f2;
+  font-weight: bold;
+}
+.key-concepts {
+  font-weight: 600;
+  color: #2c3e50;
+  margin-top: 20px;
+  margin-bottom: 10px;
+}
+.key-concepts-title {
+  font-weight: 600;
+  color: #2c3e50;
+}
+.scrollable-content {
+  max-height: 200px;
+  overflow-y: auto;
+  background-color: #f1f3f5;
+  padding: 15px;
+  border-radius: 4px;
+  margin-bottom: 20px;
+}

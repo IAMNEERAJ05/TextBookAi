@@ -119,11 +119,13 @@ body {
   padding: 20px;
   margin-top: 20px;
   margin-bottom: 20px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .chapter-details summary {
   cursor: pointer;
-  color: #000000;
+  color: #212529;
   list-style: none;
   display: flex;
   justify-content: space-between;
@@ -152,16 +154,16 @@ body {
 
 .chapter-details .content {
   padding-top: 15px;
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.5s ease-out, opacity 0.5s ease-out;
-  opacity: 0;
+  max-height: none;
+  overflow: visible;
+  opacity: 1;
+  transition: opacity 0.5s ease-out;
 }
 
 .chapter-details[open] .content {
-  max-height: 1000px;
+  max-height: none;
   opacity: 1;
-  transition: max-height 0.5s ease-in, opacity 0.5s ease-in;
+  transition: opacity 0.5s ease-in;
 }
 
 .chapter-details h3 {
@@ -182,3 +184,45 @@ body {
   color: #ff5757;
 }
 
+.card {
+  margin-bottom: 20px;
+}
+
+.form-check {
+  margin-bottom: 10px;
+}
+
+.text-success {
+  color: #28a745;
+}
+
+.text-danger {
+  color: #dc3545;
+}
+
+.text-warning {
+  color: #ffc107;
+}
+
+/* Add these new styles */
+.quiz-button-container {
+  position: sticky;
+  bottom: 0;
+  background-color: #ffffff;
+  padding: 10px 0;
+  border-top: 1px solid rgba(0, 0, 0, 0.125);
+}
+
+.quiz-button-container button {
+  width: 100%;
+  padding: 10px;
+  background-color: #007bff;
+  color: #ffffff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.quiz-button-container button:hover {
+  background-color: #0056b3;
+}

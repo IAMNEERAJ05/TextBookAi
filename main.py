@@ -1,69 +1,264 @@
-import traceback
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from fastapi import (
     FastAPI,
     Request,
-    Form,
     UploadFile,
     File,
 )
-from sqlalchemy.orm import Session
 from starlette.requests import Request
-from fastapi import HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
-import psycopg2
-from psycopg2.extras import RealDictCursor
 from pathlib import Path
-import os
-from starlette.middleware.sessions import SessionMiddleware
-import shutil
-from pdf import upload_to_gemini, generate_topics
-from passlib.context import CryptContext
-import logging
-from db import hash_password, verify_password
-from fastapi.templating import Jinja2Templates
-from pdf import generate_notes
+from typing import Optional
 from dotenv import load_dotenv
 from fastapi.staticfiles import StaticFiles
-from datetime import datetime
 
 load_dotenv()
 
-
-# Set up FastAPI
+# Initialize FastAPI app
 app = FastAPI()
-# Mount the static directory
+app.add_middleware(SessionMiddleware, secret_key="your-secret-key")
+
+# Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/static", StaticFiles(directory="uploads"), name="uploads")
+
 # Add session middleware (from starlette)
 app.add_middleware(SessionMiddleware, secret_key="your_secret_key_here")
 
 # Set up Jinja2 templates
 templates = Jinja2Templates(directory="templates")
 
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Initialize services
+note_service = NoteService()
+user_service = UserService()
+file_service = FileService()
+db = DatabaseManager()
+note_generator = NoteGenerator()
 
 
-# Mock database connection function
-def get_db_connection():
-    """Establish and return a connection to the database."""
-    return psycopg2.connect(
-        database=os.getenv("SUPABASE_DATABASE"),
-        user=os.getenv("SUPABASE_USER"),
-        password=os.getenv("SUPABASE_PASSWORD"),
-        host=os.getenv("SUPABASE_HOST"),
+async def get_current_user(request: Request) -> Optional[str]:
+    """Get current authenticated user from session."""
+    return request.session.get("username")
+
+
+async def require_auth(request: Request, username: str = Depends(get_current_user)):
+    """Dependency to require authentication."""
+    if not username:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated"
+        )
+    return username
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home(request: Request):
+    """Render home page with user data."""
+    username = request.session.get("username")
+    pdfs = []
+
+    if username:
+        # Get user's PDFs if logged in
+        response, _ = await file_service.get_user_pdfs(username)
+        pdfs = response.get("pdfs", [])
+
+    return templates.TemplateResponse(
+        "index.html", {"request": request, "username": username, "pdfs": pdfs}
     )
 
 
-# Sign-up route
+@app.get("/topic/{chapter}/{topic}", response_class=HTMLResponse)
+async def get_topic_page(
+    request: Request, chapter: str, topic: str, username: str = Depends(require_auth)
+):
+    """Render topic page."""
+    try:
+        # Get existing notes if available
+        result = db.get_topic_notes(chapter, topic)
+        if not result:
+            raise HTTPException(status_code=404, detail="Topic not found")
+
+        # Always return empty notes if they don't exist or are empty
+        # This will trigger the frontend to fetch them via API
+        existing_notes = None
+
+        return templates.TemplateResponse(
+            "topic.html",
+            {
+                "request": request,
+                "chapter": chapter,
+                "topic": topic,
+                "notes": existing_notes,  # Always None to trigger frontend fetch
+                "username": username,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error rendering topic page: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/subtopic/{chapter}/{topic}/{subtopic}", response_class=HTMLResponse)
+async def get_subtopic_page(
+    request: Request,
+    chapter: str,
+    topic: str,
+    subtopic: str,
+    username: str = Depends(require_auth),
+):
+    """Render subtopic page."""
+    try:
+        # Always return empty notes to trigger frontend fetch
+        return templates.TemplateResponse(
+            "subtopic.html",
+            {
+                "request": request,
+                "chapter": chapter,
+                "topic": topic,
+                "subtopic": subtopic,
+                "notes": None,  # Always None to trigger frontend fetch
+                "username": username,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error rendering subtopic page: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@app.get("/api/topic_notes/{chapter}/{topic}")
+async def get_topic_notes(
+    request: Request, chapter: str, topic: str, username: str = Depends(require_auth)
+):
+    """API endpoint to get topic notes."""
+    try:
+        logger.info(f"Fetching notes for chapter: {chapter}, topic: {topic}")
+        response, status_code = await note_service.get_topic_notes(chapter, topic)
+        logger.info(f"Response status: {status_code}, content: {response}")
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error getting topic notes: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+@app.get("/api/notes/{chapter}/{topic}/{subtopic}")
+async def get_notes(
+    request: Request,
+    chapter: str,
+    topic: str,
+    subtopic: str,
+    username: str = Depends(require_auth),
+):
+    """API endpoint to get subtopic notes."""
+    try:
+        response, status_code = await note_service.get_subtopic_notes(
+            chapter, topic, subtopic
+        )
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error getting subtopic notes: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+@app.post("/upload_pdf/")
+async def upload_pdf(request: Request, file: UploadFile = FastAPIFile(...)):
+    """Handle PDF upload."""
+    try:
+        # Get username from session
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(
+                content={"error": "User not authenticated"}, status_code=401
+            )
+
+        # Process the uploaded file
+        response, status_code = await file_service.process_pdf_upload(file, username)
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error uploading PDF: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    """Render login page."""
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
 @app.get("/signup", response_class=HTMLResponse)
-async def get_signup(request: Request):
-    """Render the signup page."""
+async def register_page(request: Request):
+    """Render registration page."""
     return templates.TemplateResponse("signup.html", {"request": request})
 
 
+@app.post("/login")
+async def login(
+    request: Request,
+    login: str = Form(...),  # Changed from username to login to match form
+    password: str = Form(...),
+    login_method: str = Form(...),  # Added to handle email/username login
+):
+    """Handle user login."""
+    try:
+        # Determine if login is email or username
+        if login_method == "email":
+            response, status_code = await user_service.login_user_by_email(
+                login, password
+            )
+        else:
+            response, status_code = await user_service.login_user(login, password)
+
+        if status_code == 200:
+            request.session["username"] = response.get(
+                "username"
+            )  # Store username from response
+
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error during login: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    """Handle user logout."""
+    try:
+        request.session.clear()
+        return await home(request)
+    except Exception as e:
+        logger.error(f"Error during logout: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+@app.get("/api/user_pdfs")
+async def get_user_pdfs(request: Request):
+    """Get list of user's PDFs."""
+    try:
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(
+                content={"error": "User not authenticated"}, status_code=401
+            )
+
+        response, status_code = await file_service.get_user_pdfs(username)
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error getting user PDFs: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """Handle HTTP exceptions."""
+    return JSONResponse(content={"error": exc.detail}, status_code=exc.status_code)
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    """Handle general exceptions."""
+    logger.error(f"Unhandled exception: {str(exc)}")
+    return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+
+
+# Update the existing register endpoint to handle signup
 @app.post("/signup")
 async def signup(
     request: Request,
@@ -71,93 +266,52 @@ async def signup(
     username: str = Form(...),
     password: str = Form(...),
 ):
-    """Handle user signup process."""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    hashed_password = hash_password(password)
+    """Handle user signup."""
     try:
-        # Insert new user into the database
-        cur.execute(
-            "INSERT INTO authentication (email, username, password) VALUES (%s, %s, %s)",
-            (email, username, hashed_password),
+        # First check if email exists
+        if await user_service.email_exists(email):
+            return JSONResponse(
+                content={"error": "Email already exists"}, status_code=400
+            )
+
+        # Then try to register the user
+        response, status_code = await user_service.register_user(
+            username=username, password=password, email=email
         )
-        conn.commit()
-    except psycopg2.errors.UniqueViolation:
-        # Handle case where email or username already exists
-        conn.rollback()
-        return HTMLResponse(status_code=400, content="Email or Username already exists")
-    finally:
-        cur.close()
-        conn.close()
-
-    return RedirectResponse(url="/login", status_code=302)
+        return JSONResponse(content=response, status_code=status_code)
+    except Exception as e:
+        logger.error(f"Error during signup: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
 
 
-# Login route
-@app.get("/login", response_class=HTMLResponse)
-async def get_login(request: Request):
-    """Render the login page."""
-    return templates.TemplateResponse("login.html", {"request": request})
-
-
-@app.post("/login")
-async def login(
-    request: Request,
-    login: str = Form(...),
-    password: str = Form(...),
-):
-    """Handle user login process."""
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+@app.delete("/delete_pdf/{pdf_id}")
+async def delete_pdf(request: Request, pdf_id: int):
+    """Delete a PDF and its associated data."""
     try:
-        # Fetch user from database
-        cur.execute(
-            "SELECT * FROM authentication WHERE email = %s or username = %s",
-            (login, login),
-        )
-        user = cur.fetchone()
-    finally:
-        cur.close()
-        conn.close()
+        # Get username from session
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(
+                content={"error": "User not authenticated"}, status_code=401
+            )
 
-    # Verify user credentials
-    if not user or not verify_password(password, user["password"]):
-        return HTMLResponse(status_code=400, content="Invalid email or password")
+        # Delete the PDF using FileService
+        response, status_code = await file_service.delete_pdf(pdf_id, username)
+        return JSONResponse(content=response, status_code=status_code)
 
-    # Store user information in session
-    request.session["email"] = user["email"]
-    request.session["username"] = user["username"]
-
-    return RedirectResponse(url="/", status_code=302)
+    except Exception as e:
+        logger.error(f"Error deleting PDF: {str(e)}")
+        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
 
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Add these routes after your existing routes
 
 
-@app.get("/logout")
-def logout(request: Request):
-    """Handle user logout process."""
-    username = request.session.get("username")
-    logging.info(f"Logging out user: {username}")
-
-    # Clear the session
-    request.session.clear()
-
-    # Redirect to home page
-    response = RedirectResponse(url="/")
-    logging.info("Session cleared. Redirecting to home page.")
-    return response
-
-
-# Home route
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    """Render the home page."""
-    username = request.session.get("username")
-    email = request.session.get("email")
+@app.get("/quiz/{chapter}", response_class=HTMLResponse)
+async def quiz_page(request: Request, chapter: str):
+    """Render quiz page for a chapter."""
     return templates.TemplateResponse(
-        "index.html", {"request": request, "username": username, "email": email}
+        "quiz.html", {"request": request, "chapter": chapter}
     )
 
 
@@ -179,18 +333,62 @@ def check_existing_pdf(pdf_path: str) -> bool:
     return False
 
 
-@app.post("/upload_pdf/")
-async def upload_pdf(request: Request, file: UploadFile = File(...)):
-    """Handle PDF upload and store file reference in session."""
-    username = request.session.get("username")
-    if not username:
+@app.get("/api/quiz/{chapter}")
+async def get_quiz(request: Request, chapter: str, new: bool = False):
+    """Get quiz questions for a chapter."""
+    try:
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(
+                content={"error": "User not authenticated"}, status_code=401
+            )
+
+        # Check if a quiz already exists and we're not forcing a new one
+        if not new:
+            existing_quiz = db.get_latest_quiz(chapter)
+            if existing_quiz:
+                questions = db.get_quiz_questions(existing_quiz["quizid"])
+                if questions:
+                    return JSONResponse(
+                        content={
+                            "quiz_id": existing_quiz["quizid"],
+                            "questions": questions,
+                        },
+                        status_code=200,
+                    )
+
+        # If we get here, either:
+        # 1. No existing quiz was found
+        # 2. No questions were found for the existing quiz
+        # 3. new=True was specified
+
+        # If no quiz exists, generate a new one
+        chapter_info = db.get_chapter_info(chapter)
+        if not chapter_info:
+            return JSONResponse(content={"error": "Chapter not found"}, status_code=404)
+
+        # Get the PDF file and upload to Gemini
+        pdf_path = Path(chapter_info["pdf_path"])
+        gemini_file = note_generator.upload_to_gemini(pdf_path)
+
+        # Generate quiz questions
+        questions = note_generator.generate_quiz_questions(gemini_file, chapter)
+
+        # Store quiz in database
+        quiz_id = db.store_quiz_questions(chapter, questions)
+
+        # Return only questions and options (no answers)
+        questions_only = [
+            {"questionid": i + 1, "question": q["question"], "options": q["options"]}
+            for i, q in enumerate(questions)
+        ]
+
         return JSONResponse(
-            content={"error": "You need to be logged in to upload a file."},
-            status_code=401,
+            content={"quiz_id": quiz_id, "questions": questions_only}, status_code=200
         )
 
-    # Validate file type
-    if file.content_type != "application/pdf":
+    except Exception as e:
+        logger.error(f"Error generating quiz: {str(e)}")
         return JSONResponse(
             content={"error": "Invalid file type. Please upload a PDF file."},
             status_code=400,
@@ -202,65 +400,19 @@ async def upload_pdf(request: Request, file: UploadFile = File(...)):
 
     # Save the file locally
     file_path = upload_folder / os.path.basename(str(file.filename))
-    
-    # Check if the PDF already exists
-    if check_existing_pdf(str(file_path)):
-        return JSONResponse(
-            content={"error": "This PDF has already been uploaded. Please use the library section."},
-            status_code=400,
-        )
-
     with file_path.open("wb") as f:
         shutil.copyfileobj(file.file, f)
 
     # Upload the file to Gemini and store its URI in the session
     uploaded_file = upload_to_gemini(file_path)
 
-
-    # Store the PDF path and username in the 'pdfs' table
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    try:
-        cur.execute(
-            """
-            INSERT INTO pdfs (pdf_path, username) 
-            VALUES (%s, %s) RETURNING pdfid
-            """,
-            (str(file_path), username),
-        )
-        pdf_row = cur.fetchone()
-        if pdf_row:
-            pdf_id = pdf_row[0]
-        else:
-            return JSONResponse(
-                content={"error": "Failed to retrieve pdfid after insertion."},
-                status_code=500,
-            )
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        traceback.print_exc()
-        return JSONResponse(
-            content={"error": "Database error: " + str(e)}, status_code=500
-        )
-    finally:
-        cur.close()
-
-    uploaded_file = upload_to_gemini(file_path)
-
     # Store only the file name in the session
     request.session["uploaded_file_name"] = file_path.name
 
     # Generate topics after file upload
-    topics_data = generate_topics(uploaded_file)
+    topics = generate_topics(uploaded_file)
 
-    return {
-        "message": "File uploaded and processed successfully.",
-        "file_name": file_path.name,
-        "topics": topics_data,
-    }
-
+    return {"message": "File uploaded", "file_name": file_path.name, "topics": topics}
 
 
 @app.get("/notes/")
@@ -284,20 +436,6 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
         notes = generate_notes(chapter, topic, subtopic, file_path)
         if not notes.strip():
             notes = "No notes generated for this subtopic."
-        # Update subtopic content in the database
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            UPDATE subtopics
-            SET content = %s
-            WHERE subtopicname = %s
-            """,
-            (notes, subtopic),
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
     except Exception as e:
         logging.error(f"Error generating notes: {str(e)}")
         notes = f"Error generating notes: {str(e)}"
@@ -313,160 +451,3 @@ async def get_notes(request: Request, chapter: str, topic: str, subtopic: str):
             "notes": notes,
         },
     )
-
-
-# Library Route
-@app.get("/library", response_class=HTMLResponse)
-async def library(request: Request):
-    """Render the library page with options to search, view, and delete PDFs."""
-    username = request.session.get("username")
-    if not username:
-        return JSONResponse(
-            content={"error": "You need to be logged in to access the library."},
-            status_code=401,
-        )
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT pdfid, pdf_path FROM pdfs WHERE username = %s;""", (username,))
-            pdfs = cur.fetchall()
-            # Extract only the file names
-            for pdf in pdfs:
-                pdf["pdf_name"] = os.path.basename(pdf["pdf_path"])  # Get only the file name
-    except Exception as e:
-        traceback.print_exc()
-        return JSONResponse(
-            content={"error": "Database error: " + str(e)},
-            status_code=500
-        )
-    finally:
-        conn.close()
-
-    return templates.TemplateResponse("library.html", {"request": request, "pdfs": pdfs})
-
-@app.get("/uploads/{pdf_name}", response_class=HTMLResponse)
-async def serve_pdf(pdf_name: str):
-    """Serve PDF file directly from the uploads directory."""
-    pdf_path = os.path.join("uploads", pdf_name)
-    if not os.path.exists(pdf_path):
-        raise HTTPException(status_code=404, detail="PDF not found.")
-    
-    return FileResponse(pdf_path, media_type="application/pdf")
-
-#View notes route
-@app.get("/view_notes/{pdfid}/")
-async def view_notes(request: Request, pdfid: int):
-    """Retrieve notes for the given pdfid and render the notes.html template."""
-    # Connect to the database
-    conn = get_db_connection()
-    cur = conn.cursor()
-
-    try:
-        # Fetch notes based on the pdfid
-        cur.execute(
-            """
-            SELECT c.chaptername, t.topicname, s.subtopicname, s.content 
-            FROM subtopics s
-            JOIN topics t ON s.topicid = t.topicid
-            JOIN chapters c ON t.chapterid = c.chapterid
-            WHERE c.pdfid = %s
-            """,
-            (pdfid,)
-        )
-        notes_data = cur.fetchall()
-
-        if not notes_data:
-            return HTMLResponse(
-                "No notes found for this PDF.", status_code=404
-            )
-
-        # Prepare notes content
-        notes_content = ""
-        for chaptername, topicname, subtopicname, content in notes_data:
-            notes_content += f"## {chaptername}\n### {topicname}\n#### {subtopicname}\n{content}\n\n"
-
-    except Exception as e:
-        logging.error(f"Error retrieving notes: {str(e)}")
-        return HTMLResponse(
-            "An error occurred while retrieving notes.", status_code=500
-        )
-    finally:
-        cur.close()
-        conn.close()
-
-    # Render the template with the retrieved notes
-    return templates.TemplateResponse(
-        "notes.html",
-        {
-            "request": request,
-            "subtopic": "Notes",  # Change this as needed
-            "notes": notes_content,
-        },
-    )
-
-
-
-# Delete PDF Route
-@app.post("/delete_pdf/{pdf_id}")
-async def delete_pdf(pdf_id: int, request: Request):
-    """Delete the PDF and its associated metadata."""
-    username = request.session.get("username")
-    if not username:
-        return JSONResponse(
-            content={"error": "You need to be logged in to delete a PDF."},
-            status_code=401,
-        )
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM subtopics WHERE topicid IN (SELECT topicid FROM topics WHERE chapterid IN (SELECT chapterid FROM chapters WHERE pdfid = %s));", (pdf_id,))
-            cur.execute("DELETE FROM topics WHERE chapterid IN (SELECT chapterid FROM chapters WHERE pdfid = %s);", (pdf_id,))
-            cur.execute("DELETE FROM chapters WHERE pdfid = %s;", (pdf_id,))
-            cur.execute("DELETE FROM pdfs WHERE pdfid = %s AND username = %s;", (pdf_id, username))
-            conn.commit()
-    except Exception as e:
-        conn.rollback()
-        traceback.print_exc()
-        return JSONResponse(
-            content={"error": "Failed to delete the PDF."}, status_code=500
-        )
-    finally:
-        conn.close()
-
-    return RedirectResponse(url="/library", status_code=302)
-
-# Search PDF Route
-@app.get("/library/search_pdf", response_class=HTMLResponse)
-async def search_pdf(request: Request, query: str):
-    """Search for PDFs by their name."""
-    username = request.session.get("username")
-    if not username:
-        return JSONResponse(
-            content={"error": "You need to be logged in to search PDFs."},
-            status_code=401,
-        )
-
-    conn = get_db_connection()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT pdfid, pdf_path FROM pdfs
-                WHERE username = %s AND pdf_path ILIKE %s;
-            """, (username, f"%{query}%"))
-            results = cur.fetchall()
-            # Extract only the file names for each result
-            for pdf in results:
-                pdf["pdf_name"] = os.path.basename(pdf["pdf_path"])  # Get only the file name
-    except Exception as e:
-        traceback.print_exc()
-        return JSONResponse(
-            content={"error": "Database error: " + str(e)},
-            status_code=500
-        )
-    finally:
-        conn.close()
-
-    return templates.TemplateResponse("library.html", {"request": request, "pdfs": results})
-

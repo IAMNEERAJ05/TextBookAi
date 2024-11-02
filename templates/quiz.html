@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/x-icon" href="/static/images/text-logo.png" />
+    <title>Quiz - {{ chapter }}</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/css/index.css" />
+    <style>
+      .quiz-container {
+        max-width: 800px;
+        margin: 0 auto;
+        padding: 20px;
+        position: relative;
+      }
+      .quiz-title {
+        text-align: center;
+        margin-bottom: 30px;
+      }
+      .card {
+        margin-bottom: 20px;
+      }
+      .submit-button-container {
+        text-align: center;
+        margin-top: 20px;
+      }
+      .quiz-results {
+        text-align: center;
+      }
+      .feedback {
+        text-align: left;
+        max-width: 600px;
+        margin: 0 auto;
+      }
+      .loader {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 200px;
+      }
+      .loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(255, 255, 255, 0.9);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+      }
+
+      .generating-text {
+        margin-top: 1rem;
+        font-size: 1.2rem;
+        color: #0d6efd;
+      }
+
+      .spinner {
+        width: 50px;
+        height: 50px;
+        border: 5px solid #f3f3f3;
+        border-top: 5px solid #0d6efd;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        0% {
+          transform: rotate(0deg);
+        }
+        100% {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container quiz-container mt-5">
+      <h1 class="quiz-title">Quiz for {{ chapter }}</h1>
+      <!-- <div id="quiz-controls" class="text-center mb-3" style="display: none">
+        
+      </div> -->
+      <div id="quiz-content">
+        <div class="loader">
+          <div class="spinner-border" role="status">
+            <span class="visually-hidden">Loading...</span>
+          </div>
+          <p class="mt-3">Loading quiz...</p>
+        </div>
+      </div>
+      <div class="mb-5"></div>
+    </div>
+
+    <script>
+      let quizId = null;
+
+      function toggleLoadingOverlay(show, message = "Loading quiz...") {
+        const existingOverlay = document.querySelector(".loading-overlay");
+        if (existingOverlay) {
+          existingOverlay.remove();
+        }
+
+        if (show) {
+          const overlay = document.createElement("div");
+          overlay.className = "loading-overlay";
+          overlay.innerHTML = `
+            <div class="spinner"></div>
+            <div class="generating-text">${message}</div>
+          `;
+          document.body.appendChild(overlay);
+        }
+      }
+
+      async function loadQuiz(forceNew = false) {
+        const quizContent = document.getElementById("quiz-content");
+        try {
+          toggleLoadingOverlay(
+            true,
+            forceNew ? "Generating new quiz..." : "Loading quiz..."
+          );
+
+          const url = `/api/quiz/{{ chapter }}${forceNew ? "?new=true" : ""}`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const data = await response.json();
+            if (data.error) {
+              quizContent.innerHTML = `<div class="alert alert-danger">${data.error}</div>`;
+            } else if (data.questions && data.questions.length > 0) {
+              quizId = data.quiz_id;
+              displayQuiz(data.questions);
+            } else {
+              quizContent.innerHTML = `<div class="alert alert-warning">No quiz questions were generated.</div>`;
+            }
+          } else {
+            const errorText = await response.text();
+            quizContent.innerHTML = `<div class="alert alert-danger">Error loading quiz: ${errorText}</div>`;
+          }
+        } catch (error) {
+          console.error("Error loading quiz:", error);
+          quizContent.innerHTML = `<div class="alert alert-danger">Error: ${error.message}</div>`;
+        } finally {
+          toggleLoadingOverlay(false);
+        }
+      }
+
+      function displayQuiz(questions) {
+        const quizContent = document.getElementById("quiz-content");
+        let quizHTML = "";
+
+        console.log("Questions received:", questions);
+
+        questions.forEach((q, index) => {
+          if (!q.question || !q.options) {
+            console.error("Invalid question format:", q);
+            return;
+          }
+
+          quizHTML += `
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h5 class="card-title">${index + 1}. ${q.question}</h5>
+                    ${
+                      Array.isArray(q.options)
+                        ? q.options
+                            .map(
+                              (option, i) => `
+                            <div class="form-check">
+                                <input class="form-check-input" type="radio" name="q${index}" id="q${index}o${i}" value="${option.charAt(
+                                0
+                              )}">
+                                <label class="form-check-label" for="q${index}o${i}">${option}</label>
+                            </div>
+                        `
+                            )
+                            .join("")
+                        : '<div class="alert alert-warning">Invalid options format</div>'
+                    }
+                </div>
+            </div>
+            `;
+        });
+
+        quizHTML += `
+          <div class="submit-button-container">
+            <button class="btn btn-primary" onclick="submitQuiz()">Submit Quiz</button>
+          </div>`;
+        quizContent.innerHTML = quizHTML;
+      }
+
+      async function submitQuiz() {
+        if (!quizId) {
+          console.error("No quiz ID found");
+          return;
+        }
+
+        try {
+          // Get answers from server
+          const response = await fetch(`/api/quiz/${quizId}/answers`);
+          if (!response.ok) {
+            throw new Error("Failed to get quiz answers");
+          }
+
+          const data = await response.json();
+          const answers = data.answers;
+
+          // Calculate score and generate feedback
+          let score = 0;
+          let feedback = "";
+
+          answers.forEach((answer, index) => {
+            const selectedAnswer = document.querySelector(
+              `input[name="q${index}"]:checked`
+            );
+
+            feedback += generateQuestionFeedback(
+              index,
+              selectedAnswer?.value,
+              answer
+            );
+
+            if (selectedAnswer?.value === answer.correct_answer) {
+              score++;
+            }
+          });
+
+          // Display results
+          displayResults(score, answers.length, feedback);
+        } catch (error) {
+          console.error("Error submitting quiz:", error);
+          alert("Error submitting quiz. Please try again.");
+        }
+      }
+
+      function generateQuestionFeedback(index, selected, answer) {
+        const questionElement = document
+          .querySelector(`[name="q${index}"]`)
+          .closest(".card");
+        const question =
+          questionElement.querySelector(".card-title").textContent;
+        const options = Array.from(
+          questionElement.querySelectorAll(".form-check-label")
+        ).map((label) => label.textContent);
+
+        let feedback = `
+          <div class="card mb-3">
+            <div class="card-body">
+              <h5 class="card-title">${question}</h5>
+              <ul class="list-group">
+        `;
+
+        options.forEach((option, i) => {
+          const optionLetter = String.fromCharCode(65 + i);
+          const isCorrect = optionLetter === answer.correct_answer;
+          const isSelected = optionLetter === selected;
+          let itemClass = "list-group-item";
+
+          if (isCorrect) {
+            itemClass += " list-group-item-success";
+          } else if (isSelected && !isCorrect) {
+            itemClass += " list-group-item-danger";
+          }
+
+          feedback += `
+            <li class="${itemClass}">
+              ${option}
+              ${
+                isCorrect ? '<span class="badge bg-success">Correct</span>' : ""
+              }
+              ${
+                isSelected && !isCorrect
+                  ? '<span class="badge bg-danger">Your Answer</span>'
+                  : ""
+              }
+            </li>
+          `;
+        });
+
+        feedback += `
+              </ul>
+              <p class="mt-2"><strong>Explanation:</strong> ${answer.explanation}</p>
+            </div>
+          </div>
+        `;
+
+        return feedback;
+      }
+
+      function displayResults(score, total, feedback) {
+        const quizContent = document.getElementById("quiz-content");
+        // const quizControls = document.getElementById("quiz-controls");
+
+        quizContent.innerHTML = `
+          <div class="quiz-results">
+            <h3>Quiz Results</h3>
+            <div class="feedback">
+              ${feedback}
+            </div>
+            <p>Your score: ${score} out of ${total}</p>
+            <button class="btn btn-primary mt-3" onclick="window.close()">Close Quiz</button>
+            <button class="btn btn-secondary" onclick="loadQuiz(true)">
+              Take New Quiz
+            </button>
+          </div>
+        `;
+
+        // Show the "Take New Quiz" button after submission
+        // quizControls.style.display = "block";
+      }
+
+      // Load the quiz when the page loads
+      window.onload = () => loadQuiz(false);
+    </script>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+  </body>
+</html>
