@@ -30,26 +30,6 @@
         transform: rotate(360deg);
       }
     }
-/* 
-    .subtopic-link {
-      color: #007bff;
-      text-decoration: none;
-      font-weight: bold;
-    }
-
-    .subtopic-link:hover {
-      color: #0056b3;
-    }
-
-    .chapter-title {
-      color: #333;
-      font-weight: bold;
-    }
-
-    .topic-title {
-      color: #555;
-    }
-      */
 
     .pdf-link {
       color: #333;
@@ -60,145 +40,6 @@
     .pdf-link:hover {
       color: #4bc8e4;
     } 
-/*
-    .topic-link {
-      color: #28a745;
-      text-decoration: none;
-      font-weight: bold;
-    }
-
-    .topic-link:hover {
-      color: #218838;
-    }
-
-    .nested-subtopics {
-        margin-left: 20px;
-        list-style-type: circle;
-    }
-    
-    .subtopics-list {
-        margin-left: 15px;
-        list-style-type: disc;
-    }
-    
-    .topic-list {
-        list-style-type: none;
-    }
-    
-    .chapter-title {
-        margin-bottom: 10px;
-        color: #2c3e50;
-    }
-    
-    .topic-link {
-        color: #34495e;
-        text-decoration: none;
-    }
-    
-    .subtopic-link {
-        color: #7f8c8d;
-        text-decoration: none;
-    }
-    
-    .topic-link:hover, .subtopic-link:hover {
-        text-decoration: underline;
-    } */
-
-    /* details {
-        margin-left: 20px;
-    }
-
-    summary {
-        cursor: pointer;
-        margin-bottom: 5px;
-    }
-
-    summary:hover {
-        color: #4bc8e4;
-    } */
-
-    /* .subtopics-list {
-        margin-left: 20px;
-        list-style-type: none;
-    }
-    
-    .topic-list {
-        list-style-type: none;
-        padding-left: 0;
-    }
-    
-    .chapter-title {
-        display: inline;
-        margin-bottom: 10px;
-        color: #2c3e50;
-    }
-    
-    .topic-link {
-        color: #34495e;
-        text-decoration: none;
-    }
-    
-    .subtopic-link {
-        color: #7f8c8d;
-        text-decoration: none;
-    }
-    
-    .topic-link:hover, .subtopic-link:hover {
-        color: #4bc8e4;
-        text-decoration: none;
-    } */
-
-    /* details > summary {
-        list-style: none;
-    }
-    details > summary::-webkit-details-marker {
-        display: none;
-    }
-
-    details > summary::before {
-        content: '▶';
-        margin-right: 5px;
-        color: #7f8c8d;
-    }
-    details[open] > summary::before {
-        content: '▼';
-    }
-
-    .list-group-item {
-        border: none;
-        padding: 0.5rem 1rem;
-    }
-
-    details {
-        margin: 0.5rem 0;
-    }
-
-    summary {
-        cursor: pointer;
-        list-style: none;
-        margin-bottom: 0.5rem;
-    }
-
-    summary::-webkit-details-marker {
-        display: none;
-    }
-
-    .topic-link, .subtopic-link {
-        color: #007bff;
-        text-decoration: none;
-    }
-
-    .topic-link:hover, .subtopic-link:hover {
-        color: #0056b3;
-    }
-
-    .chapter-title {
-        color: #333;
-    }
-
-    .topic-title {
-        color: #555;
-    } */
   </style>
 </head>
 
@@ -210,7 +51,7 @@
       </h1>
       <div>
         {% if username %}
-        <a href="/logout" class="btn btn-outline-danger">Logout</a>
+        <a href="/profile" class="btn btn-outline-primary">Profile</a>
         {% else %}
         <a href="/login" class="btn btn-outline-primary me-2">Login</a>
         {% endif %}
@@ -369,14 +210,67 @@
       </div>
     </div>
 
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+      <div id="deleteToast" class="toast" role="alert">
+        <div class="toast-header">
+          <strong class="me-auto">Success</strong>
+          <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+        </div>
+        <div class="toast-body">
+          PDF deleted successfully
+        </div>
+      </div>
+    </div>
+
     <script>
       let abortController = null;
       let contentGenerated = false;
 
-      document.getElementById("upload-form").onsubmit = async function (event) {
-        event.preventDefault();
-        await generateContent();
-      };
+      document.getElementById("upload-form").addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const formData = new FormData(this);
+        
+        try {
+          showLoader();
+          const response = await fetch("/upload_pdf/", {
+            method: "POST",
+            body: formData,
+          });
+
+          const data = await response.json();
+
+          if (response.ok) {
+            // Update the chapters display
+            displayChapters(data.structure.chapters);
+            
+            // Add the new PDF to library silently
+            const newPdf = {
+              id: data.pdf_id,
+              name: formData.get('file').name
+            };
+            
+            // Get current PDFs and add new one
+            const currentPdfs = Array.from(document.querySelectorAll('#library .list-group-item'))
+              .map(item => ({
+                id: item.querySelector('.btn-danger').getAttribute('onclick').match(/deletePDF\('(.+?)'\)/)[1],
+                name: item.querySelector('.pdf-link').textContent.trim()
+              }));
+            
+            // Update library without switching tabs
+            updateLibrary([...currentPdfs, newPdf]);
+            
+            // Reset form
+            this.reset();
+          } else {
+            throw new Error(data.error || 'Failed to upload PDF');
+          }
+        } catch (error) {
+          console.error('Error uploading PDF:', error);
+          alert('An error occurred while uploading the PDF. Please try again.');
+        } finally {
+          hideLoader();
+        }
+      });
 
       document.getElementById("cancelBtn").onclick = function () {
         if (abortController) {
@@ -457,13 +351,16 @@
         if (!subtopics || !Array.isArray(subtopics) || subtopics.length === 0) return "";
         
         return subtopics.map(subtopic => {
-            // Handle both string and object subtopics
+            // Handle string subtopics
             if (typeof subtopic === 'string') {
                 return `<li class="list-group-item">
                     <a href="/subtopic/${encodeURIComponent(chapterName)}/${encodeURIComponent(topicName)}/${encodeURIComponent(subtopic)}" 
                         class="subtopic-link" target="_blank">${subtopic}</a>
                 </li>`;
-            } else if (typeof subtopic === 'object' && subtopic.name) {
+            }
+            
+            // Handle object subtopics (nested structure)
+            if (typeof subtopic === 'object' && subtopic.name) {
                 let subtopicHTML = `
                 <li class="list-group-item">
                     <details>
@@ -472,6 +369,7 @@
                                 class="subtopic-link" target="_blank">${subtopic.name}</a>
                         </summary>`;
                 
+                // Recursively render nested subtopics if they exist
                 if (subtopic.subtopics && subtopic.subtopics.length > 0) {
                     subtopicHTML += `<ul class="list-group mt-2">
                         ${renderSubtopics(subtopic.subtopics, chapterName, subtopic.name)}
@@ -481,7 +379,8 @@
                 subtopicHTML += `</details></li>`;
                 return subtopicHTML;
             }
-            return "";
+            
+            return ""; // Return empty string for invalid subtopic format
         }).join("");
       }
 
@@ -567,23 +466,36 @@
 
       async function deletePDF(pdfId) {
         if (confirm('Are you sure you want to delete this PDF?')) {
-            try {
-                const response = await fetch(`/delete_pdf/${pdfId}`, {
-                    method: 'DELETE',
-                });
+          try {
+            const response = await fetch(`/delete_pdf/${pdfId}`, {
+              method: 'DELETE',
+            });
+            
+            const data = await response.json();
+            
+            if (response.ok) {
+              // Find and remove the PDF item from the list
+              const pdfItem = document.querySelector(`li.list-group-item:has(button[onclick*="${pdfId}"])`);
+              if (pdfItem) {
+                pdfItem.remove();
                 
-                const data = await response.json();
-                
-                if (response.ok) {
-                    alert('PDF deleted successfully');
-                    location.reload(); // Reload the page to reflect changes
-                } else {
-                    alert(data.error || 'Failed to delete PDF');
+                // Check if there are any PDFs left
+                const remainingPdfs = document.querySelectorAll('#library .list-group-item');
+                if (remainingPdfs.length === 0) {
+                  updateLibrary([]); // This will show the "No PDFs" message
                 }
-            } catch (error) {
-                console.error('Error deleting PDF:', error);
-                alert('An error occurred. Please try again.');
+              }
+              
+              // Show success toast
+              const toast = new bootstrap.Toast(document.getElementById('deleteToast'));
+              toast.show();
+            } else {
+              throw new Error(data.error || 'Failed to delete PDF');
             }
+          } catch (error) {
+            console.error('Error deleting PDF:', error);
+            alert('An error occurred while deleting the PDF. Please try again.');
+          }
         }
       }
 
@@ -602,6 +514,160 @@
               })
           })
       });
+
+      function renderLibraryItem(pdf) {
+        return `
+          <div class="pdf-item" data-pdf-id="${pdf.id}">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <a href="#" class="pdf-link" onclick="viewBook(${pdf.id})">${pdf.name}</a>
+              <div class="btn-group">
+                <button class="btn btn-sm btn-primary" onclick="openQuiz('${pdf.name}')">
+                  Quiz
+                </button>
+                <button class="btn btn-sm btn-danger" onclick="deletePDF(${pdf.id})">
+                  Delete
+                </button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      function updateLibrary(pdfs) {
+        const libraryContainer = document.querySelector('#library .card-body');
+        if (!libraryContainer) return;
+
+        if (pdfs.length === 0) {
+          libraryContainer.innerHTML = '<p>No PDFs in your library yet. Upload a PDF to get started!</p>';
+          return;
+        }
+
+        const libraryHTML = `
+          <h5 class="card-title">My Library</h5>
+          <ul class="list-group">
+            ${pdfs.map(pdf => `
+              <li class="list-group-item">
+                <details>
+                  <summary class="d-flex justify-content-between align-items-center">
+                    <span class="pdf-link">${pdf.name}</span>
+                  </summary>
+                  <div class="mt-3 text-center">
+                    <button class="btn btn-primary me-2" onclick="viewBook('${pdf.id}')">
+                      View Book
+                    </button>
+                    <button class="btn btn-danger" onclick="deletePDF('${pdf.id}')">
+                      Delete
+                    </button>
+                  </div>
+                </details>
+              </li>
+            `).join('')}
+          </ul>
+        `;
+
+        libraryContainer.innerHTML = libraryHTML;
+      }
+
+      function displayChapters(chapters) {
+        const chaptersContainer = document.createElement('div');
+        chaptersContainer.className = 'chapters-container';
+
+        chapters.forEach(chapter => {
+            const chapterDetails = document.createElement('details');
+            chapterDetails.className = 'chapter-details';
+
+            const summary = document.createElement('summary');
+            summary.innerHTML = `<h3>${chapter.name}</h3>`;
+            chapterDetails.appendChild(summary);
+
+            if (chapter.topics && chapter.topics.length > 0) {
+                const topicsList = document.createElement('ul');
+                topicsList.className = 'list-group mt-2';
+
+                chapter.topics.forEach(topic => {
+                    const topicItem = document.createElement('li');
+                    topicItem.className = 'list-group-item';
+
+                    // Direct topic link without details/summary
+                    topicItem.innerHTML = `
+                        <strong class="topic-title">
+                            <a href="/topic/${encodeURIComponent(chapter.name)}/${encodeURIComponent(topic.name)}" 
+                               target="_blank">${topic.name}</a>
+                        </strong>
+                    `;
+
+                    // Handle subtopics
+                    if (topic.subtopics && topic.subtopics.length > 0) {
+                        const subtopicsList = document.createElement('ul');
+                        subtopicsList.className = 'list-group mt-2';
+
+                        topic.subtopics.forEach(subtopic => {
+                            const subtopicItem = document.createElement('li');
+                            subtopicItem.className = 'list-group-item';
+
+                            // Handle both string and object subtopics
+                            if (typeof subtopic === 'string') {
+                                subtopicItem.innerHTML = `
+                                    <a href="/subtopic/${encodeURIComponent(chapter.name)}/${encodeURIComponent(topic.name)}/${encodeURIComponent(subtopic)}" 
+                                       class="subtopic-link" target="_blank">${subtopic}</a>
+                                `;
+                            } else if (typeof subtopic === 'object' && subtopic.name) {
+                                // Direct subtopic link without details/summary
+                                subtopicItem.innerHTML = `
+                                    <a href="/subtopic/${encodeURIComponent(chapter.name)}/${encodeURIComponent(topic.name)}/${encodeURIComponent(subtopic.name)}" 
+                                       class="subtopic-link" target="_blank">${subtopic.name}</a>
+                                `;
+
+                                // Handle nested subtopics
+                                if (subtopic.subtopics && subtopic.subtopics.length > 0) {
+                                    const nestedList = document.createElement('ul');
+                                    nestedList.className = 'list-group mt-2';
+                                    subtopic.subtopics.forEach(nested => {
+                                        const nestedItem = document.createElement('li');
+                                        nestedItem.className = 'list-group-item';
+                                        nestedItem.innerHTML = `
+                                            <a href="/subtopic/${encodeURIComponent(chapter.name)}/${encodeURIComponent(topic.name)}/${encodeURIComponent(nested)}" 
+                                               class="subtopic-link" target="_blank">${nested}</a>
+                                        `;
+                                        nestedList.appendChild(nestedItem);
+                                    });
+                                    subtopicItem.appendChild(nestedList);
+                                }
+                            }
+
+                            subtopicsList.appendChild(subtopicItem);
+                        });
+
+                        topicItem.appendChild(subtopicsList);
+                    }
+
+                    topicsList.appendChild(topicItem);
+                });
+
+                chapterDetails.appendChild(topicsList);
+            }
+
+            // Add Quiz button
+            const quizButton = document.createElement('button');
+            quizButton.className = 'btn btn-primary mt-3';
+            quizButton.onclick = () => openQuiz(encodeURIComponent(chapter.name));
+            quizButton.textContent = 'Take Quiz';
+            chapterDetails.appendChild(quizButton);
+
+            chaptersContainer.appendChild(chapterDetails);
+        });
+
+        document.getElementById("response").innerHTML = '';
+        document.getElementById("response").appendChild(chaptersContainer);
+      }
+
+      function showLoader() {
+        document.getElementById("loader").style.display = "block";
+      }
+
+      function hideLoader() {
+        document.getElementById("loader").style.display = "none";
+      }
 
       
     </script>
