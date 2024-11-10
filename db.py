@@ -9,6 +9,9 @@ import os
 from dotenv import load_dotenv
 from psycopg2 import pool
 from contextlib import contextmanager
+from psycopg2.pool import SimpleConnectionPool
+from tenacity import retry, stop_after_attempt, wait_exponential
+import time
 
 load_dotenv()
 
@@ -18,30 +21,88 @@ logger = logging.getLogger(__name__)
 
 class DatabaseManager:
     def __init__(self):
-        # Create a connection pool during initialization
-        self.pool = pool.SimpleConnectionPool(
-            minconn=1,
-            maxconn=10,  # Adjust based on your needs
-            dbname=os.getenv("SUPABASE_DATABASE"),
-            user=os.getenv("SUPABASE_USER"),
-            password=os.getenv("SUPABASE_PASSWORD"),
-            host=os.getenv("SUPABASE_HOST"),
-        )
-        logger.info("Database connection pool established")
+        self.pool = None
+        self.create_pool()
 
+    def create_pool(self):
+        """Create a new connection pool."""
+        try:
+            if self.pool:
+                self.pool.closeall()
+
+            self.pool = SimpleConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dbname=os.getenv("SUPABASE_DATABASE"),
+                user=os.getenv("SUPABASE_USER"),
+                password=os.getenv("SUPABASE_PASSWORD"),
+                host=os.getenv("SUPABASE_HOST"),
+                # Connection timeout set to 5 minutes (300 seconds)
+                connect_timeout=300,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+            logger.info("Database connection pool established")
+        except Exception as e:
+            logger.error(f"Error creating connection pool: {str(e)}")
+            raise
+
+    @retry(
+        stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10)
+    )
     @contextmanager
     def get_connection(self):
-        """Get a connection from the pool with context management."""
-        conn = self.pool.getconn()
+        """Get a connection from the pool with retry logic."""
+        if not self.pool:
+            raise ValueError("Database connection pool not established")
+
+        conn = None
         try:
+            conn = self.pool.getconn()
+
+            # Test if connection is alive
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+
             yield conn
+
+        except Exception as e:
+            logger.error(f"Database connection error: {str(e)}")
+            if conn:
+                try:
+                    self.pool.putconn(conn, close=True)
+                except Exception:
+                    pass  # Ignore errors when closing bad connection
+            conn = None  # Ensure conn is None after handling error
+
+            # Recreate pool if connection failed
+            try:
+                self.create_pool()
+            except Exception as e:
+                logger.error(f"Failed to recreate connection pool: {str(e)}")
+            raise
+
         finally:
-            self.pool.putconn(conn)
+            if conn:
+                try:
+                    self.pool.putconn(conn)
+                except Exception as e:
+                    logger.error(f"Error returning connection to pool: {str(e)}")
+                    # If we can't return the connection, close the pool and create a new one
+                    try:
+                        self.create_pool()
+                    except Exception:
+                        pass
 
     def __del__(self):
         """Clean up the connection pool when the instance is destroyed."""
-        if hasattr(self, "pool"):
-            self.pool.closeall()
+        if hasattr(self, "pool") and self.pool:
+            try:
+                self.pool.closeall()
+            except Exception as e:
+                logger.error(f"Error closing connection pool: {str(e)}")
 
     def get_topic_notes(self, chapter: str, topic: str) -> Optional[Dict]:
         """Get topic notes from database if they exist."""
@@ -337,44 +398,47 @@ class DatabaseManager:
         Raises:
             psycopg2.Error: If there's a database error
         """
-        with self.get_connection() as conn:
-            cur = conn.cursor(cursor_factory=RealDictCursor)
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
-                cur.execute(
-                    """
-                    SELECT 
-                        pdfid,
-                        pdf_path,
-                        username,
-                        gemini_file,
-                        created_at as upload_date,
-                        title,
-                        description
-                    FROM pdfs
-                    WHERE username = %s
-                    ORDER BY created_at DESC
-                    """,
-                    (username,),
-                )
-                results = cur.fetchall()
+                with self.get_connection() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        cur.execute(
+                            """
+                            SELECT 
+                                pdfid,
+                                pdf_path,
+                                username,
+                                gemini_file,
+                                created_at as upload_date,
+                                title,
+                                description
+                            FROM pdfs
+                            WHERE username = %s
+                            ORDER BY created_at DESC
+                            """,
+                            (username,),
+                        )
+                        results = cur.fetchall()
 
-                if results:
-                    logger.info(f"Found {len(results)} PDFs for user: {username}")
-                else:
-                    logger.info(f"No PDFs found for user: {username}")
+                        if results:
+                            logger.info(
+                                f"Found {len(results)} PDFs for user: {username}"
+                            )
+                        else:
+                            logger.info(f"No PDFs found for user: {username}")
 
-                return list(
-                    results
-                )  # Convert results to list to ensure it's serializable
+                        return list(results)
 
-            except psycopg2.Error as e:
-                logger.error(f"Database error in get_user_pdfs: {str(e)}")
-                raise
             except Exception as e:
-                logger.error(f"Error in get_user_pdfs: {str(e)}")
-                raise
-            finally:
-                cur.close()
+                logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    logger.error("All retry attempts failed")
+                    return []  # Return empty list after all retries fail
+                # Wait before retrying
+                time.sleep(1 * (attempt + 1))
+
+        return []  # Ensure we always return a list
 
     def create_chapter(self, chapter_name: str, pdf_id: int) -> int:
         """Create a new chapter in the database."""
@@ -567,9 +631,26 @@ class DatabaseManager:
 
                 # Recursively process nested subtopics if they exist
                 if "subtopics" in subtopic and subtopic["subtopics"]:
-                    self._create_subtopics(
-                        cur, topic_id, subtopic["subtopics"], subtopic_id
-                    )
+                    # Check if subtopics is a list of strings or objects
+                    nested_subtopics = []
+                    for nested in subtopic["subtopics"]:
+                        if isinstance(nested, str):
+                            # Convert string subtopic to dict format
+                            nested_subtopics.append({"name": nested, "subtopics": []})
+                        else:
+                            nested_subtopics.append(nested)
+
+                    self._create_subtopics(cur, topic_id, nested_subtopics, subtopic_id)
+            elif isinstance(subtopic, str):
+                # Handle string subtopics
+                cur.execute(
+                    """
+                    INSERT INTO subtopics (topicid, subtopicname, parent_subtopicid)
+                    VALUES (%s, %s, %s)
+                    RETURNING subtopicid
+                    """,
+                    (topic_id, subtopic, parent_id),
+                )
 
     def get_pdf_info(self, pdf_id: int) -> Optional[Dict]:
         """Get PDF information."""
@@ -705,43 +786,47 @@ class DatabaseManager:
                     )
                     SELECT 
                         c.chaptername as name,
-                        json_agg(
-                            DISTINCT jsonb_build_object(
-                                'name', t.topicname,
-                                'subtopics', (
-                                    SELECT json_agg(
-                                        jsonb_build_object(
-                                            'name', st.name,
-                                            'subtopics', (
-                                                SELECT COALESCE(json_agg(
-                                                    jsonb_build_object(
-                                                        'name', child.name,
-                                                        'subtopics', (
-                                                            SELECT COALESCE(json_agg(
-                                                                jsonb_build_object(
-                                                                    'name', grandchild.name
-                                                                )
-                                                            ), '[]'::json)
-                                                            FROM subtopic_tree grandchild
-                                                            WHERE grandchild.parent_subtopicid = child.subtopicid
-                                                        )
-                                                    )
-                                                ), '[]'::json)
-                                                FROM subtopic_tree child
-                                                WHERE child.parent_subtopicid = st.subtopicid
-                                            )
+                        (
+                            SELECT json_agg(topic_data)
+                            FROM (
+                                SELECT jsonb_build_object(
+                                    'name', t.topicname,
+                                    'subtopics', (
+                                        SELECT json_agg(
+                                            jsonb_build_object(
+                                                'name', st.name,
+                                                'subtopics', (
+                                                    SELECT COALESCE(json_agg(
+                                                        jsonb_build_object(
+                                                            'name', child.name,
+                                                            'subtopics', (
+                                                                SELECT COALESCE(json_agg(
+                                                                    jsonb_build_object(
+                                                                        'name', grandchild.name
+                                                                    ) ORDER BY grandchild.subtopicid
+                                                                ), '[]'::json)
+                                                                FROM subtopic_tree grandchild
+                                                                WHERE grandchild.parent_subtopicid = child.subtopicid
+                                                            )
+                                                        ) ORDER BY child.subtopicid
+                                                    ), '[]'::json)
+                                                    FROM subtopic_tree child
+                                                    WHERE child.parent_subtopicid = st.subtopicid
+                                                )
+                                            ) ORDER BY st.subtopicid
                                         )
+                                        FROM subtopic_tree st
+                                        WHERE st.topicid = t.topicid AND st.parent_subtopicid IS NULL
                                     )
-                                    FROM subtopic_tree st
-                                    WHERE st.topicid = t.topicid AND st.parent_subtopicid IS NULL
-                                )
-                            )
-                        ) FILTER (WHERE t.topicname IS NOT NULL) as topics
+                                ) as topic_data
+                                FROM topics t
+                                WHERE t.chapterid = c.chapterid
+                                ORDER BY t.topicid
+                            ) sub
+                        ) as topics
                     FROM chapters c
-                    LEFT JOIN topics t ON c.chapterid = t.chapterid
                     WHERE c.pdfid = %s
-                    GROUP BY c.chaptername
-                    ORDER BY c.chaptername;
+                    ORDER BY c.chapterid;
                     """,
                     (pdf_id,),
                 )
@@ -904,6 +989,112 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"Error getting latest quiz: {str(e)}")
                 raise
+
+    def check_connection_health(self):
+        """Check if connection pool is healthy and reconnect if needed."""
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            return True
+        except Exception as e:
+            logger.error(f"Connection health check failed: {str(e)}")
+            try:
+                self.create_pool()
+            except Exception as e:
+                logger.error(f"Failed to recreate pool during health check: {str(e)}")
+            return False
+
+    def get_user_profile(self, username: str) -> Dict:
+        """Get detailed user profile information."""
+        with self.get_connection() as conn:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            try:
+                cur.execute(
+                    """
+                    SELECT 
+                        u.userid,
+                        u.username,
+                        u.email,
+                        u.created_at,
+                        u.last_login,
+                        COUNT(DISTINCT p.pdfid) as total_pdfs,
+                        COUNT(DISTINCT c.chapterid) as total_chapters,
+                        COUNT(DISTINCT t.topicid) as total_topics,
+                        COUNT(DISTINCT s.subtopicid) as total_subtopics
+                    FROM users u
+                    LEFT JOIN pdfs p ON u.username = p.username
+                    LEFT JOIN chapters c ON p.pdfid = c.pdfid
+                    LEFT JOIN topics t ON c.chapterid = t.chapterid
+                    LEFT JOIN subtopics s ON t.topicid = s.topicid
+                    WHERE u.username = %s
+                    GROUP BY u.userid, u.username, u.email, u.created_at, u.last_login
+                    """,
+                    (username,),
+                )
+                return cur.fetchone()
+            finally:
+                cur.close()
+
+    def get_user_detailed_statistics(self, username: str) -> Dict:
+        """Get detailed user activity statistics."""
+        with self.get_connection() as conn:
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            try:
+                cur.execute(
+                    """
+                    WITH pdf_stats AS (
+                        SELECT 
+                            COUNT(*) as total_pdfs,
+                            MAX(created_at) as last_upload
+                        FROM pdfs
+                        WHERE username = %s
+                    ),
+                    quiz_stats AS (
+                        SELECT 
+                            COUNT(DISTINCT q.quizid) as total_quizzes
+                        FROM quizzes q
+                        WHERE q.chapter IN (
+                            SELECT DISTINCT c.chaptername 
+                            FROM chapters c 
+                            JOIN pdfs p ON c.pdfid = p.pdfid 
+                            WHERE p.username = %s
+                        )
+                    )
+                    SELECT 
+                        pdf_stats.*,
+                        quiz_stats.*
+                    FROM pdf_stats, quiz_stats
+                    """,
+                    (username, username),
+                )
+                return cur.fetchone()
+            finally:
+                cur.close()
+
+    def update_user_profile(self, username: str, updates: Dict) -> None:
+        """Update user profile information."""
+        with self.get_connection() as conn:
+            cur = conn.cursor()
+            try:
+                # Build dynamic update query
+                set_clause = ", ".join(f"{k} = %s" for k in updates.keys())
+                values = list(updates.values()) + [username]
+
+                cur.execute(
+                    f"""
+                    UPDATE users 
+                    SET {set_clause}
+                    WHERE username = %s
+                    """,
+                    values,
+                )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                raise
+            finally:
+                cur.close()
 
 
 # Password hashing settings

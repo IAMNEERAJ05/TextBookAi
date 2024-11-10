@@ -1,0 +1,105 @@
+import json
+import re
+from typing import Dict, Any, List
+from pdf import PDFStructure, SubtopicDict, ChapterDict, TopicDict
+
+
+def _parse_json_response(response: str) -> Dict:
+    """Parse JSON response from Gemini."""
+    try:
+        # First try to find JSON within code blocks
+        match = re.search(r"```(?:json)?\n(.*?)\n```", response, re.DOTALL)
+        if match:
+            json_str = match.group(1)
+        else:
+            # If no code blocks found, try to parse the entire response
+            json_str = response
+
+        # Clean up the string
+        json_str = json_str.strip()
+
+        # Parse JSON
+        result = json.loads(json_str)
+
+        # logger.info(f"Successfully parsed JSON structure: {result}")
+        return result
+
+    except json.JSONDecodeError as e:
+        # logger.error(f"Error parsing JSON response: {str(e)}")
+        # logger.error(f"Raw response: {response}")
+        raise ValueError(f"Failed to parse JSON response: {str(e)}")
+
+
+def _validate_structure(structure: Dict) -> PDFStructure:
+    """Validate the PDF structure format and clean any nested objects."""
+    if not isinstance(structure, dict) or "chapters" not in structure:
+        raise ValueError("Invalid structure: missing 'chapters' key")
+
+    def clean_name(item: Any) -> str:
+        """Convert any name object to string."""
+        if isinstance(item, dict):
+            return str(item.get("name", ""))
+        return str(item)
+
+    def process_subtopics(subtopics_list: List[Any]) -> List[SubtopicDict]:
+        """Process subtopics recursively maintaining structure."""
+        cleaned_subtopics: List[SubtopicDict] = []
+        for subtopic in subtopics_list:
+            if isinstance(subtopic, dict):
+                cleaned_subtopic: SubtopicDict = {
+                    "name": clean_name(subtopic["name"]),
+                    "subtopics": [],  # Initialize with empty list
+                }
+                # Handle nested subtopics recursively
+                if "subtopics" in subtopic and subtopic["subtopics"]:
+                    cleaned_subtopic["subtopics"] = process_subtopics(
+                        subtopic["subtopics"]
+                    )
+                cleaned_subtopics.append(cleaned_subtopic)
+            else:
+                cleaned_subtopics.append(
+                    {"name": clean_name(subtopic), "subtopics": []}
+                )
+        return cleaned_subtopics
+
+    # Clean and validate chapters
+    cleaned_structure: PDFStructure = {"chapters": []}
+
+    for chapter in structure["chapters"]:
+        if not isinstance(chapter, dict):
+            raise ValueError("Invalid chapter format")
+
+        cleaned_chapter: ChapterDict = {
+            "name": clean_name(chapter["name"]),
+            "topics": [],
+        }
+
+        # Clean and validate topics
+        if "topics" in chapter:
+            for topic in chapter["topics"]:
+                if not isinstance(topic, dict):
+                    raise ValueError("Invalid topic format")
+
+                cleaned_topic: TopicDict = {
+                    "name": clean_name(topic["name"]),
+                    "subtopics": [],
+                }
+
+                # Clean and validate subtopics
+                if "subtopics" in topic:
+                    cleaned_topic["subtopics"] = process_subtopics(topic["subtopics"])
+
+                cleaned_chapter["topics"].append(cleaned_topic)
+
+        cleaned_structure["chapters"].append(cleaned_chapter)
+
+    # logger.info("Structure validation and cleaning completed successfully")
+    return cleaned_structure
+
+
+response = """
+```json
+{'chapters': [{'name': 'Chapter 1: Python Basics', 'topics': [{'name': 'Entering Expressions into the Interactive Shell', 'subtopics': [{'name': 'Integers, Floating-Point Numbers, and Strings', 'subtopics': ['String Concatenation and Replication']}, 'Storing Values in Variables', {'name': 'Assignment Statements', 'subtopics': ['Variable Names']}]}, {'name': 'Your First Program', 'subtopics': ['Dissecting Your Program', {'name': 'Comments', 'subtopics': ['The print() Function', 'The input() Function', "Printing the User's Name", 'The len() Function', 'The str(), int(), and float() Functions']}]}]}, {'name': 'Chapter 2: Flow Control', 'topics': [{'name': 'Boolean Values', 'subtopics': ['Comparison Operators', {'name': 'Boolean Operators', 'subtopics': ['Binary Boolean Operators', 'The not Operator']}]}, 'Mixing Boolean and Comparison Operators', {'name': 'Elements of Flow Control', 'subtopics': ['Conditions', 'Blocks of Code', 'Program Execution']}, {'name': 'Flow Control Statements', 'subtopics': ['if Statements', 'else Statements', 'elif Statements', {'name': 'while Loop Statements', 'subtopics': ['An Annoying while Loop', 'break Statements', 'continue Statements']}, {'name': 'for Loops and the range() Function', 'subtopics': ['An Equivalent while Loop', 'The Starting, Stopping, and Stepping Arguments to range()']}]}, {'name': 'Importing Modules', 'subtopics': ['from import Statements', 'Ending a Program Early with sys.exit()']}]}, {'name': 'Chapter 3: Functions', 'topics': [{'name': 'def Statements with Parameters', 'subtopics': [{'name': 'Return Values and return Statements', 'subtopics': ['The None Value']}, 'Keyword Arguments and print()']}, {'name': 'Local and Global Scope', 'subtopics': ['Local Variables Cannot Be Used in the Global Scope', 'Local Scopes Cannot Use Variables in Other Local Scopes', 'Global Variables Can Be Read from a Local Scope', 'Local and Global Variables with the Same Name']}, {'name': 'The global Statement', 'subtopics': ['Exception Handling']}, 'A Short Program: Guess the Number']}, {'name': 'Chapter 4: Lists', 'topics': [{'name': 'The List Data Type', 'subtopics': ['Getting Individual Values in a List with Indexes', 'Negative Indexes', 'Getting Sublists with Slices', "Getting a List's Length with len()", 'Changing Values in a List with Indexes']}, {'name': 'List Concatenation and List Replication', 'subtopics': ['Removing Values from Lists with del Statements']}, 'Working with Lists', {'name': 'Using for Loops with Lists', 'subtopics': ['The in and not in Operators', 'The Multiple Assignment Trick', 'Augmented Assignment Operators']}, {'name': 'Methods', 'subtopics': ['Finding a Value in a List with the index() Method', 'Adding Values to Lists with the append() and insert() Methods', 'Removing Values from Lists with remove()', 'Sorting the Values in a List with the sort() Method']}, {'name': 'Example Program: Magic 8 Ball with a List', 'subtopics': [{'name': 'List-like Types: Strings and Tuples', 'subtopics': ['Mutable and Immutable Data Types']}, {'name': 'The Tuple Data Type', 'subtopics': ['Converting Types with the list() and tuple() Functions', 'References', 'Passing References', 'The copy Module’s copy() and deepcopy() Functions']}]}]}, {'name': 'Chapter 5: Dictionaries and Structuring Data', 'topics': [{'name': 'The Dictionary Data Type', 'subtopics': ['Dictionaries vs. Lists', 'The keys(), values(), and items() Methods']}, {'name': 'Checking Whether a Key or Value Exists in a Dictionary', 'subtopics': ['The get() Method', 'The setdefault() Method', 'Pretty Printing']}, {'name': 'Using Data Structures to Model Real-World Things', 'subtopics': ['A Tic-Tac-Toe Board', 'Nested Dictionaries and Lists']}]}, {'name': 'Chapter 6: Manipulating Strings', 'topics': [{'name': 'Working with Strings', 'subtopics': [{'name': 'String Literals', 'subtopics': ['Double Quotes', 'Escape Characters', 'Raw Strings', 'Multiline Strings with Triple Quotes', 'Multiline Comments']}, 'Indexing and Slicing Strings', 'The in and not in Operators with Strings', {'name': 'Useful String Methods', 'subtopics': ['The upper(), lower(), isupper(), and islower() String Methods', 'The isX String Methods', 'The startswith() and endswith() String Methods', 'The join() and split() String Methods', 'Justifying Text with rjust(), ljust(), and center()', 'Removing Whitespace with strip(), rstrip(), and lstrip()']}, 'Copying and Pasting Strings with the pyperclip Module']}, {'name': 'Project: Password Locker', 'subtopics': ['Step 1: Program Design and Data Structures', 'Step 2: Handle Command Line Arguments', 'Step 3: Copy the Right Password']}, {'name': 'Project: Adding Bullets to Wiki Markup', 'subtopics': ['Step 1: Copy and Paste from the Clipboard', 'Step 2: Separate the Lines of Text and Add the Star', 'Step 3: Join the Modified Lines']}]}, {'name': 'Chapter 7: Pattern Matching with Regular Expressions', 'topics': [{'name': 'Finding Patterns of Text Without Regular Expressions', 'subtopics': [{'name': 'Finding Patterns of Text with Regular Expressions', 'subtopics': ['Creating Regex Objects', 'Matching Regex Objects', 'Review of Regular Expression Matching']}, {'name': 'More Pattern Matching with Regular Expressions', 'subtopics': ['Grouping with Parentheses', 'Matching Multiple Groups with the Pipe', 'Optional Matching with the Question Mark', 'Matching Zero or More with the Star', 'Matching One or More with the Plus', 'Matching Specific Repetitions with Curly Brackets', 'Greedy and Nongreedy Matching', 'The findall() Method']}, {'name': 'Character Classes', 'subtopics': ['Making Your Own Character Classes', 'The Caret and Dollar Sign Characters', 'The Wildcard Character', 'Matching Everything with Dot-Star', 'Matching Newlines with the Dot Character', 'Review of Regex Symbols', 'Case-Insensitive Matching']}, {'name': 'Substituting Strings with the sub() Method', 'subtopics': ['Managing Complex Regexes', 'Combining re.IGNORECASE, re.DOTALL, and re.VERBOSE']}]}, {'name': 'Project: Phone Number and Email Address Extractor', 'subtopics': ['Step 1: Create a Regex for Phone Numbers', 'Step 2: Create a Regex for Email Addresses', 'Step 3: Find All Matches in the Clipboard Text', 'Step 4: Join the Matches into a String for the Clipboard', 'Running the Program']}]}, {'name': 'Chapter 8: Reading and Writing Files', 'topics': [{'name': 'Files and File Paths', 'subtopics': ['Backslash on Windows and Forward Slash on OS X and Linux', 'The Current Working Directory', 'Absolute vs. Relative Paths', 'Creating New Folders with os.makedirs()', 'The os.path Module']}, {'name': 'The File Reading/Writing Process', 'subtopics': ['Opening Files with the open() Function', {'name': 'Reading the Contents of Files', 'subtopics': ['Writing to Files']}, {'name': 'Saving Variables with the shelve Module', 'subtopics': ['Saving Variables with the pprint.pformat() Function']}]}, {'name': 'Project: Generating Random Quiz Files', 'subtopics': ['Step 1: Store the Quiz Data in a Dictionary', 'Step 2: Create the Quiz File and Shuffle the Question Order', 'Step 3: Create the Answer Options', 'Step 4: Write Content to the Quiz and Answer Key Files']}, {'name': 'Project: Multiclipboard', 'subtopics': ['Step 1: Comments and Shelf Setup', 'Step 2: Save Clipboard Content with a Keyword', 'Step 3: List Keywords and Load a Keyword’s Content']}]}, {'name': 'Chapter 9: Organizing Files', 'topics': [{'name': 'The shutil Module', 'subtopics': ['Copying Files and Folders', 'Moving and Renaming Files and Folders', 'Permanently Deleting Files and Folders', 'Safe Deletes with the send2trash Module', 'Walking a Directory Tree']}, {'name': 'Compressing Files with the zipfile Module', 'subtopics': ['Reading ZIP Files', 'Extracting from ZIP Files', 'Creating and Adding to ZIP Files']}, {'name': 'Project: Renaming Files with American-Style Dates to European-Style Dates', 'subtopics': ['Step 1: Create a Regex for American-Style Dates', 'Step 2: Identify the Date Parts from the Filenames', 'Step 3: Form the New Filename and Rename the Files']}, {'name': 'Project: Backing Up a Folder into a ZIP File', 'subtopics': ['Step 1: Figure Out the ZIP File’s Name', 'Step 2: Create the New ZIP File', 'Step 3: Walk the Directory Tree and Add to the ZIP File']}]}, {'name': 'Chapter 10: Debugging', 'topics': [{'name': 'Raising Exceptions', 'subtopics': ['Getting the Traceback as a String', 'Assertions']}, {'name': 'Using an Assertion in a Traffic Light Simulation', 'subtopics': ['Disabling Assertions', 'Logging']}, {'name': 'Using the logging Module', 'subtopics': ['Don’t Debug with print()', 'Logging Levels', 'Disabling Logging', 'Logging to a File']}, {'name': 'IDLE’s Debugger', 'subtopics': ['Go', 'Step', 'Over', 'Out', 'Quit', 'Debugging a Number Adding Program', 'Breakpoints']}]}, {'name': 'Chapter 11: Web Scraping', 'topics': [{'name': 'Project: mapit.py with the webbrowser Module', 'subtopics': ['Step 1: Figure Out the URL', 'Step 2: Handle the Command Line Arguments', 'Step 3: Handle the Clipboard Content and Launch the Browser']}, {'name': 'Downloading Files from the Web with the requests Module', 'subtopics': ['Downloading a Web Page with the requests.get() Function', 'Checking for Errors', 'Saving Downloaded Files to the Hard Drive', 'HTML']}, {'name': 'Resources for Learning HTML', 'subtopics': ['A Quick Refresher', 'Viewing the Source HTML of a Web Page', 'Opening Your Browser’s Developer Tools', 'Using the Developer Tools to Find HTML Elements']}, {'name': 'Parsing HTML with the BeautifulSoup Module', 'subtopics': ['Creating a BeautifulSoup Object from HTML', 'Finding an Element with the select() Method', 'Getting Data from an Element’s Attributes']}, {'name': 'Project: “I’m Feeling Lucky” Google Search', 'subtopics': ['Step 1: Get the Command Line Arguments and Request the Search Page', 'Step 2: Find All the Results', 'Step 3: Open Web Browsers for Each Result']}, {'name': 'Project: Downloading All XKCD Comics', 'subtopics': ['Step 1: Design the Program', 'Step 2: Download the Web Page', 'Step 3: Find and Download the Comic Image', 'Step 4: Save the Image and Find the Previous Comic']}, {'name': 'Controlling the Browser with the selenium Module', 'subtopics': ['Starting a Selenium-Controlled Browser', 'Finding Elements on the Page', 'Clicking the Page', 'Filling Out and Submitting Forms', 'Sending Special Keys', 'Clicking Browser Buttons']}]}, {'name': 'Chapter 12: Working with Excel Spreadsheets', 'topics': [{'name': 'Excel Documents', 'subtopics': ['Installing the openpyxl Module', 'Reading Excel Documents']}, {'name': 'Opening Excel Documents with OpenPyXL', 'subtopics': ['Getting Sheets from the Workbook', 'Getting Cells from the Sheets', 'Converting Between Column Letters and Numbers', 'Getting Rows and Columns from the Sheets', 'Workbooks, Sheets, Cells']}, {'name': 'Project: Reading Data from a Spreadsheet', 'subtopics': ['Step 1: Read the Spreadsheet Data', 'Step 2: Populate the Data Structure', 'Step 3: Write the Results to a File']}, {'name': 'Writing Excel Documents', 'subtopics': ['Creating and Saving Excel Documents', 'Creating and Removing Sheets', 'Writing Values to Cells']}, {'name': 'Project: Updating a Spreadsheet', 'subtopics': ['Step 1: Set Up a Data Structure with the Update Information', 'Step 2: Check All Rows and Update Incorrect Prices']}, {'name': 'Setting the Font Style of Cells', 'subtopics': ['Font Objects', 'Formulas', 'Adjusting Rows and Columns', 'Setting Row Height and Column Width', 'Merging and Unmerging Cells', 'Freeze Panes', 'Charts']}]}, {'name': 'Chapter 13: Working with PDF and Word Documents', 'topics': [{'name': 'PDF Documents', 'subtopics': ['Extracting Text from PDFs', 'Decrypting PDFs', 'Creating PDFs']}, {'name': 'Copying Pages', 'subtopics': ['Rotating Pages', 'Overlaying Pages', 'Encrypting PDFs']}, {'name': 'Project: Combining Select Pages from Many PDFs', 'subtopics': ['Step 1: Find All PDF Files', 'Step 2: Open Each PDF', 'Step 3: Add Each Page', 'Step 4: Save the Results']}, {'name': 'Word Documents', 'subtopics': ['Reading Word Documents', 'Getting the Full Text from a .docx File', 'Styling Paragraph and Run Objects', 'Creating Word Documents with Nondefault Styles', 'Run Attributes']}, {'name': 'Writing Word Documents', 'subtopics': ['Adding Headings', 'Adding Line and Page Breaks', 'Adding Pictures']}]}, {'name': 'Chapter 14: Working with CSV Files and JSON Data', 'topics': [{'name': 'The CSV Module', 'subtopics': ['Reader Objects', 'Reading Data from Reader Objects in a for Loop', 'Writer Objects', 'The delimiter and lineterminator Keyword Arguments']}, {'name': 'Project: Removing the Header from CSV Files', 'subtopics': ['Step 1: Loop Through Each CSV File', 'Step 2: Read in the CSV File', 'Step 3: Write Out the CSV File Without the First Row']}, {'name': 'JSON and APIs', 'subtopics': ['The JSON Module', 'Reading JSON with the loads() Function', 'Writing JSON with the dumps() Function']}, {'name': 'Project: Fetching Current Weather Data', 'subtopics': ['Step 1: Get Location from the Command Line Argument', 'Step 2: Download the JSON Data', 'Step 3: Load JSON Data and Print Weather']}]}, {'name': 'Chapter 15: Keeping Time, Scheduling Tasks, and Launching Programs', 'topics': [{'name': 'The time Module', 'subtopics': ['The time.time() Function', 'The time.sleep() Function', 'Rounding Numbers']}, {'name': 'Project: Super Stopwatch', 'subtopics': ['Step 1: Set Up the Program to Track Times', 'Step 2: Track and Print Lap Times']}, {'name': 'The datetime Module', 'subtopics': ['The timedelta Data Type', 'Pausing Until a Specific Date', 'Converting datetime Objects into Strings', 'Converting Strings into datetime Objects', 'Review of Python’s Time Functions']}, 'Multithreading', {'name': 'Passing Arguments to the Thread’s Target Function', 'subtopics': ['Concurrency Issues']}, {'name': 'Project: Multithreaded XKCD Downloader', 'subtopics': ['Step 1: Modify the Program to Use a Function', 'Step 2: Create and Start Threads', 'Step 3: Wait for All Threads to End']}, {'name': 'Launching Other Programs from Python', 'subtopics': ['Passing Command Line Arguments to Popen()', 'Task Scheduler, launchd, and cron', 'Opening Websites with Python', 'Running Other Python Scripts', 'Opening Files with Default Applications']}]}, {'name': 'Chapter 16: Sending Email and Text Messages', 'topics': ['SMTP', {'name': 'Sending Email', 'subtopics': ['Connecting to an SMTP Server', 'Sending the SMTP “Hello” Message', 'Starting TLS Encryption', 'Logging in to the SMTP Server', 'Sending an Email', 'Disconnecting from the SMTP Server']}, 'IMAP', {'name': 'Retrieving and Deleting Emails with IMAP', 'subtopics': ['Connecting to an IMAP Server', 'Logging in to the IMAP Server', 'Searching for Email', 'Selecting a Folder', 'Performing the Search', 'Size Limits', 'Fetching an Email and Marking It As Read', 'Getting Email Addresses from a Raw Message', 'Getting the Body from a Raw Message', 'Deleting Emails', 'Disconnecting from the IMAP Server']}, {'name': 'Project: Sending Member Dues Reminder Emails', 'subtopics': ['Step 1: Open the Excel File', 'Step 2: Find All Unpaid Members', 'Step 3: Send Customized Email Reminders']}, {'name': 'Sending Text Messages with Twilio', 'subtopics': ['Signing Up for a Twilio Account', 'Sending Text Messages']}, {'name': 'Project: “Just Text Me” Module'}]}, {'name': 'Chapter 17: Manipulating Images', 'topics': [{'name': 'Computer Image Fundamentals', 'subtopics': ['Colors and RGBA Values', 'Coordinates and Box Tuples']}, {'name': 'Manipulating Images with Pillow', 'subtopics': ['Working with the Image Data Type', 'Cropping Images', 'Copying and Pasting Images onto Other Images', 'Resizing an Image', 'Rotating and Flipping Images', 'Changing Individual Pixels']}, {'name': 'Project: Adding a Logo', 'subtopics': ['Step 1: Open the Logo Image', 'Step 2: Loop Over All Files and Open Images', 'Step 3: Resize the Images', 'Step 4: Add the Logo and Save the Changes']}, {'name': 'Drawing on Images', 'subtopics': ['Drawing Shapes', 'Points', 'Lines', 'Rectangles', 'Ellipses', 'Polygons', 'Drawing Example', 'Drawing Text']}]}, {'name': 'Chapter 18: Controlling the Keyboard and Mouse with GUI Automation', 'topics': [{'name': 'Installing the pyautogui Module', 'subtopics': ['Staying on Track']}, {'name': 'Shutting Down Everything by Logging Out', 'subtopics': ['Pauses and Fail-Safes', 'Controlling Mouse Movement']}, {'name': 'Moving the Mouse', 'subtopics': ['Getting the Mouse Position']}, {'name': 'Project: “Where Is the Mouse Right Now?”', 'subtopics': ['Step 1: Import the Module', 'Step 2: Set Up the Quit Code and Infinite Loop', 'Step 3: Get and Print the Mouse Coordinates']}, {'name': 'Controlling Mouse Interaction', 'subtopics': ['Clicking the Mouse', 'Dragging the Mouse', 'Scrolling the Mouse']}, {'name': 'Working with the Screen', 'subtopics': ['Getting a Screenshot', 'Analyzing the Screenshot', 'Project: Extending the mouseNow Program', 'Image Recognition']}, {'name': 'Controlling the Keyboard', 'subtopics': ['Sending a String from the Keyboard', 'Key Names', 'Pressing and Releasing the Keyboard', 'Hotkey Combinations', 'Review of the PyAutoGUI Functions']}, {'name': 'Project: Automatic Form Filler', 'subtopics': ['Step 1: Figure Out the Steps', 'Step 2: Set Up Coordinates', 'Step 3: Start Typing Data', 'Step 4: Handle Select Lists and Radio Buttons', 'Step 5: Submit the Form and Wait']}]}]}
+```
+"""
+print(_validate_structure(_parse_json_response(response)))
