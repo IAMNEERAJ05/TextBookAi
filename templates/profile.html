@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Profile - VidyAI</title>
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Serif+Display&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css"
+    />
+    <link href="/static/css/index.css" rel="stylesheet" />
+  </head>
+  <body>
+    <!-- Navbar -->
+    <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm mb-4">
+      <div class="container">
+        <a class="navbar-brand brand-name" href="/">
+          <span class="brand-vidy">Vidy</span><span class="brand-ai">AI</span>
+        </a>
+        <button
+          class="navbar-toggler"
+          type="button"
+          data-bs-toggle="collapse"
+          data-bs-target="#navbarNav"
+          aria-controls="navbarNav"
+          aria-expanded="false"
+          aria-label="Toggle navigation"
+        >
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNav">
+          <ul class="navbar-nav ms-auto">
+            <li class="nav-item">
+              <a class="nav-link" href="/">
+                <i class="bi bi-house-door"></i> Home
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link active" href="/profile">
+                <i class="bi bi-person"></i> Profile
+              </a>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </nav>
+
+    <div class="container">
+      <div class="profile-container">
+        <div class="profile-header">
+          <div class="profile-avatar">
+            <i class="bi bi-person-circle"></i>
+          </div>
+          <div class="profile-info">
+            <div class="d-flex align-items-center gap-2">
+              <h1>{{ username }}</h1>
+              <span class="badge bg-primary">Student</span>
+            </div>
+            <p class="form-control-plaintext">{{ user_data.email }}</p>
+            <p class="text-muted mb-1">
+              <i class="bi bi-calendar3"></i>
+              Member since {{ user_data.created_at.strftime('%B %d, %Y') }}
+            </p>
+            {% if user_data.last_login %}
+            <p class="text-muted mb-0">
+              <i class="bi bi-clock"></i>
+              Last login: {{ user_data.last_login.strftime('%B %d, %Y %H:%M') }}
+            </p>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="row g-4 my-3">
+          <div class="col-md-6">
+            <div class="stat-card h-100">
+              <div class="d-flex align-items-center">
+                <div class="stat-icon bg-primary-subtle">
+                  <i class="bi bi-file-pdf"></i>
+                </div>
+                <div>
+                  <h3 class="mb-0">{{ stats.total_pdfs }}</h3>
+                  <p class="text-muted mb-0">PDFs Uploaded</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="stat-card h-100">
+              <div class="d-flex align-items-center">
+                <div class="stat-icon bg-success-subtle">
+                  <i class="bi bi-question-circle"></i>
+                </div>
+                <div>
+                  <h3 class="mb-0">{{ stats.total_quizzes }}</h3>
+                  <p class="text-muted mb-0">Quizzes Available</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {% if stats.last_upload %}
+        <div class="recent-activity">
+          <div class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-clock-history text-primary"></i>
+            <h3 class="mb-0">Recent Activity</h3>
+          </div>
+          <p>
+            <i class="bi bi-upload"></i>
+            Last PDF upload: {{ stats.last_upload.strftime('%B %d, %Y %H:%M') }}
+          </p>
+        </div>
+        {% endif %}
+
+        <div class="mb-3"></div>
+
+        <form id="profileForm">
+          <div class="mb-4">
+            <button
+              type="button"
+              class="btn btn-outline-primary"
+              id="togglePasswordChange"
+            >
+              <i class="bi bi-shield-lock"></i> Change Password
+            </button>
+          </div>
+
+          <div class="password-section d-none">
+            <div class="d-flex align-items-center gap-2 mb-4">
+              <i class="bi bi-shield-lock"></i>
+              <h3 class="mb-0">Password Change</h3>
+            </div>
+            <div class="form-group mb-3">
+              <label for="currentPassword">Current Password</label>
+              <input
+                type="password"
+                id="currentPassword"
+                name="current_password"
+                class="form-control"
+              />
+            </div>
+            <div class="form-group mb-4">
+              <label for="newPassword">New Password</label>
+              <input
+                type="password"
+                id="newPassword"
+                name="new_password"
+                class="form-control"
+              />
+            </div>
+            <div class="d-grid">
+              <button
+                type="submit"
+                class="btn btn-primary"
+                id="saveChangesBtn"
+              >
+                <i class="bi bi-save"></i> Save Changes
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div class="text-center mt-3 pb-3"></div>
+          <a href="/logout" class="btn btn-danger">
+            <i class="bi bi-box-arrow-right"></i> Logout
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container position-fixed top-0 end-0 p-3">
+      <div
+        id="profileToast"
+        class="toast align-items-center text-white border-0"
+        role="alert"
+        aria-live="assertive"
+        aria-atomic="true"
+      >
+        <div class="d-flex">
+          <div class="toast-body"></div>
+          <button
+            type="button"
+            class="btn-close btn-close-white me-2 m-auto"
+            data-bs-dismiss="toast"
+            aria-label="Close"
+          ></button>
+        </div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+      // Toggle password change section
+      document
+        .getElementById("togglePasswordChange")
+        .addEventListener("click", function () {
+          const passwordSection = document.querySelector(".password-section");
+          const isHidden = passwordSection.classList.contains("d-none");
+
+          if (isHidden) {
+            passwordSection.classList.remove("d-none");
+            this.innerHTML =
+              '<i class="bi bi-shield-lock"></i> Cancel password change';
+            this.classList.replace(
+              "btn-outline-primary",
+              "btn-outline-secondary"
+            );
+          } else {
+            passwordSection.classList.add("d-none");
+            this.innerHTML =
+              '<i class="bi bi-shield-lock"></i> Want to change password?';
+            this.classList.replace(
+              "btn-outline-secondary",
+              "btn-outline-primary"
+            );
+            // Clear password fields
+            document.getElementById("currentPassword").value = "";
+            document.getElementById("newPassword").value = "";
+          }
+        });
+
+      // Form submission handler
+      document
+        .getElementById("profileForm")
+        .addEventListener("submit", async (e) => {
+          e.preventDefault();
+          const formData = new FormData(e.target);
+          const toast = document.getElementById("profileToast");
+
+          // Validate password fields
+          const currentPassword = formData.get("current_password");
+          const newPassword = formData.get("new_password");
+
+          if (!currentPassword || !newPassword) {
+            toast.classList.remove("bg-danger", "bg-success");
+            toast.classList.add("bg-warning");
+            toast.querySelector(".toast-body").textContent =
+              "Please fill in both password fields";
+            const bsToast = new bootstrap.Toast(toast);
+            bsToast.show();
+            return;
+          }
+
+          try {
+            const response = await fetch("/update-profile", {
+              method: "POST",
+              body: formData,
+            });
+
+            const data = await response.json();
+
+            toast.classList.remove("bg-danger", "bg-success", "bg-warning");
+            if (response.ok) {
+              toast.classList.add("bg-success");
+              toast.querySelector(".toast-body").textContent =
+                "Profile updated successfully";
+              document.getElementById("currentPassword").value = "";
+              document.getElementById("newPassword").value = "";
+              // Reset password change section
+              document
+                .querySelector(".password-section")
+                .classList.add("d-none");
+              const toggleBtn = document.getElementById("togglePasswordChange");
+              toggleBtn.innerHTML =
+                '<i class="bi bi-shield-lock"></i> Want to change password?';
+              toggleBtn.classList.replace(
+                "btn-outline-secondary",
+                "btn-outline-primary"
+              );
+            } else {
+              toast.classList.add("bg-danger");
+              toast.querySelector(".toast-body").textContent =
+                data.error || "Failed to update profile";
+            }
+
+            const bsToast = new bootstrap.Toast(toast);
+            bsToast.show();
+          } catch (error) {
+            console.error("Error:", error);
+            toast.classList.remove("bg-danger", "bg-success", "bg-warning");
+            toast.classList.add("bg-danger");
+            toast.querySelector(".toast-body").textContent =
+              "An error occurred while updating the profile";
+            const bsToast = new bootstrap.Toast(toast);
+            bsToast.show();
+          }
+        });
+    </script>
+  </body>
+</html>

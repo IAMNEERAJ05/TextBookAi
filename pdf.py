@@ -94,11 +94,13 @@ class NoteGenerator:
             logger.info(f"Generating notes for topic: {chapter}/{topic}")
 
             prompt = f"""Analyze the PDF content and generate comprehensive notes for the topic '{topic}' 
-            from chapter '{chapter}'. Focus on:
-            1. Key concepts and main ideas
-            2. Important definitions and terminology
-            3. Examples and applications
-            4. Relationships to other concepts
+            from chapter '{chapter}'.
+            
+            Everything should be in the context of the book don't include anything outside the book.
+            
+            Explain the content in a way that is easy to understand and easy to remember.
+
+            You can use the examples of this topic from the book to explain the content.
 
             Also, select only the relevant images for the content you mentioned in the notes.
             If no image is relevant, don't include any image.
@@ -110,9 +112,9 @@ class NoteGenerator:
             Format the response as a JSON object with 'notes' in markdown format and relevant 'images':
             ```json
             {{
-                "notes": "[Markdown formatted notes here Start directly with the content for '{topic}' without repeating the chapter or topic names. ]",
+                "notes": "[A proper markdown formatted notes here Start directly with the content for '{topic}' without repeating the chapter or topic names. ]",
                 "images": [
-                    {{"filename": "image1.jpg", "caption": "extract the caption from the file"}}
+                    {{"filename": "image_1_1.jpeg", "caption": "extract the caption from the file"}}
                 ]
             }}
             ```
@@ -139,28 +141,26 @@ class NoteGenerator:
             logger.info(f"Generating notes for subtopic: {chapter}/{topic}/{subtopic}")
 
             prompt = f"""Analyze the PDF content and generate detailed notes for the subtopic '{subtopic}' 
-            under topic '{topic}' from chapter '{chapter}'. Focus on:
-            1. Detailed explanation of the subtopic
-            2. Specific examples and use cases
-            3. Technical details and implementation aspects
-            4. Common challenges or misconceptions
+            under topic '{topic}' from chapter '{chapter}'. 
+            Everything should be in the context of the book don't include anything outside the book.
+            Explain the content in a way that is easy to understand and easy to remember.
 
             Also, select only the relevant images for the content you mentioned in the notes.
             If no image is relevant, don't include any image.
             
             For each selected image, extract the caption from the file.
 
-            Available images: {', '.join(image_files)}
+            The available images are: {', '.join(image_files)}
 
-            Return a valid JSON object with the following structure:
+            Format the response as a JSON object with 'notes' in markdown format and relevant 'images':
             {{
-                "notes": "[Markdown formatted notes here Start directly with the content for '{subtopic}' without repeating the chapter or topic names. ]",
+                "notes": "[A proper markdown formatted notes here Start directly with the content for '{subtopic}' without repeating the chapter or topic names. ]",
                 "images": [
-                    {{"filename": "image1.jpg", "caption": "Caption text"}}
+                    {{"filename": "image_1_1.jpeg", "caption": "extract the caption from the file"}}
                 ]
             }}
 
-            Important:
+            Some important points:
             1. Start the notes content directly without repeating chapter/topic names
             2. Use proper markdown formatting
             3. Ensure the JSON is properly formatted and valid
@@ -211,15 +211,14 @@ class NoteGenerator:
         """Extract the structure of chapters and topics from the PDF."""
         try:
             model = genai.GenerativeModel(
-                model_name="gemini-1.5-flash",
+                model_name="gemini-1.5-pro",
                 generation_config=GenerationConfig(
                     temperature=0.3,
                     top_p=0.8,
                     top_k=40,
-                    max_output_tokens=8192,
                 ),
                 system_instruction="""
-You are designated as an expert text analyst specializing in content organization and summarization. Your primary task is to dissect and organize book content into a structured format comprising chapters, main topics, and subtopics. Adhere to the following directives:
+                You are designated as an expert text analyst specializing in content organization and summarization. Your primary task is to dissect and organize book content into a structured format comprising chapters, main topics, and subtopics. Adhere to the following directives:
 
                 1. Reading Comprehension: Thoroughly read and understand the content of the provided book or document.
                 2. Content Breakdown: Identify and delineate the chapters first, followed by the main topics within each chapter, and further break these down into their respective subtopics.
@@ -263,13 +262,14 @@ You are designated as an expert text analyst specializing in content organizatio
                 11. Content Relevance: Create subtopics or topics only if there is sufficient context provided in the book. Do not derive new subtopics or topics with no content foundation in the text.
                 12. Problem-Solving: In case of ambiguities or categorization difficulties, briefly explain your reasoning after the JSON output.
                 13. Review and Validation: Thoroughly review your output to ensure accuracy, consistency, and correct JSON formatting before submission.
-                14. Do not create any subtopics or topics if there is no context about them in the book.
+                14. Do not create any subtopics or topics if there is no context about them in the book. Or do not create nested subtopics without any context.
                 15. You can use book's table of contents to create chapters, topics, and subtopics.
-                16. Do not include references and citations in the output.
+                16. Do not include references, citations and Appendix as the chapters, anything outside the chapters are not required.
                 17. If you think there is no context for a topic, then do not derive any subtopics for that topic.
                 18. If you think there is no context for a subtopic, you can skip it.
-
-""",
+                19. Everything should be in the context of the book.
+                20. Give me the proper reasoning for the subtopics and topics you created outside the JSON structure.
+                """,
             )
             response = model.generate_content(
                 [
@@ -277,6 +277,8 @@ You are designated as an expert text analyst specializing in content organizatio
                     "Give me chapters, topics, and subtopics from this book.Make sure topics and subtopics are not created if there is no context in the book. And Make sure to follow the instructions strictly.",
                 ]
             )
+
+            print(f"response: {response.text}")
 
             # Parse and validate the structure
             structure = self._parse_json_response(response.text)
@@ -290,71 +292,143 @@ You are designated as an expert text analyst specializing in content organizatio
 
     def _validate_structure(self, structure: Dict) -> PDFStructure:
         """Validate the PDF structure format and clean any nested objects."""
-        if not isinstance(structure, dict) or "chapters" not in structure:
-            raise ValueError("Invalid structure: missing 'chapters' key")
+        try:
+            if not isinstance(structure, dict) or "chapters" not in structure:
+                raise ValueError("Invalid structure: missing 'chapters' key")
 
-        def clean_name(item: Any) -> str:
-            """Convert any name object to string."""
-            if isinstance(item, dict):
-                return str(item.get("name", ""))
-            return str(item)
+            def clean_name(item: Any) -> str:
+                """Convert any name object to string."""
+                if isinstance(item, dict):
+                    return str(item.get("name", ""))
+                return str(item)
 
-        def process_subtopics(subtopics_list: List[Any]) -> List[SubtopicDict]:
-            """Process subtopics recursively maintaining structure."""
-            cleaned_subtopics: List[SubtopicDict] = []
-            for subtopic in subtopics_list:
-                if isinstance(subtopic, dict):
-                    cleaned_subtopic: SubtopicDict = {
-                        "name": clean_name(subtopic["name"]),
-                        "subtopics": [],  # Initialize with empty list
-                    }
-                    # Handle nested subtopics recursively
-                    if "subtopics" in subtopic and subtopic["subtopics"]:
-                        cleaned_subtopic["subtopics"] = process_subtopics(
-                            subtopic["subtopics"]
+            def process_subtopics(subtopics_list: List[Any]) -> List[SubtopicDict]:
+                """Process subtopics recursively maintaining structure."""
+                cleaned_subtopics: List[SubtopicDict] = []
+                for subtopic in subtopics_list:
+                    if isinstance(subtopic, dict):
+                        cleaned_subtopic: SubtopicDict = {
+                            "name": clean_name(subtopic["name"]),
+                            "subtopics": [],  # Initialize with empty list
+                        }
+                        # Handle nested subtopics recursively
+                        if "subtopics" in subtopic and subtopic["subtopics"]:
+                            cleaned_subtopic["subtopics"] = process_subtopics(
+                                subtopic["subtopics"]
+                            )
+                        cleaned_subtopics.append(cleaned_subtopic)
+                    else:
+                        cleaned_subtopics.append(
+                            {"name": clean_name(subtopic), "subtopics": []}
                         )
-                    cleaned_subtopics.append(cleaned_subtopic)
-                else:
-                    cleaned_subtopics.append(
-                        {"name": clean_name(subtopic), "subtopics": []}
+                return cleaned_subtopics
+
+            # Clean and validate chapters
+            cleaned_structure: PDFStructure = {"chapters": []}
+
+            for chapter in structure["chapters"]:
+                if not isinstance(chapter, dict):
+                    return self.fix_structure(
+                        structure
+                    )  # Return fixed structure instead of raising error
+
+                cleaned_chapter: ChapterDict = {
+                    "name": clean_name(chapter["name"]),
+                    "topics": [],
+                }
+
+                # Clean and validate topics
+                if "topics" in chapter:
+                    for topic in chapter["topics"]:
+                        if not isinstance(topic, dict):
+                            return self.fix_structure(
+                                structure
+                            )  # Return fixed structure instead of raising error
+
+                        cleaned_topic: TopicDict = {
+                            "name": clean_name(topic["name"]),
+                            "subtopics": [],
+                        }
+
+                        # Clean and validate subtopics
+                        if "subtopics" in topic:
+                            cleaned_topic["subtopics"] = process_subtopics(
+                                topic["subtopics"]
+                            )
+
+                        cleaned_chapter["topics"].append(cleaned_topic)
+
+                cleaned_structure["chapters"].append(cleaned_chapter)
+
+            logger.info("Structure validation and cleaning completed successfully")
+            return cleaned_structure
+        except Exception as e:
+            logger.error(f"Error validating structure: {str(e)}")
+            return self.fix_structure(structure)
+
+    def fix_structure(self, structure: Dict) -> PDFStructure:
+        """Fix the structure of the PDF."""
+        try:
+            prompt = f"""Fix the structure of the following JSON structure:
+            {json.dumps(structure, indent=2)}
+            and return in the below format:
+            ```json
+            {{
+                "chapters": [
+                    {{
+                        "name": "Chapter name",
+                        "topics": [
+                            {{
+                                "name": "Topic name",
+                                "subtopics": [
+                                    {{
+                                        "name": "Subtopic name",
+                                        "subtopics": []
+                                    }}
+                                ]
+                            }}
+                        ]
+                    }}
+                ]
+            }}
+            ```
+            """
+            response = self.model.generate_content([prompt]).text
+            json_structure = self._parse_json_response(response)
+
+            # Create a basic valid structure if the response is invalid
+            if not isinstance(json_structure, dict) or "chapters" not in json_structure:
+                return PDFStructure(chapters=[])
+
+            # Cast the structure to PDFStructure type
+            fixed_structure: PDFStructure = {
+                "chapters": [
+                    ChapterDict(
+                        name=chapter.get("name", ""),
+                        topics=[
+                            TopicDict(
+                                name=topic.get("name", ""),
+                                subtopics=[
+                                    SubtopicDict(
+                                        name=subtopic.get("name", ""),
+                                        subtopics=subtopic.get("subtopics", []),
+                                    )
+                                    for subtopic in topic.get("subtopics", [])
+                                ],
+                            )
+                            for topic in chapter.get("topics", [])
+                        ],
                     )
-            return cleaned_subtopics
-
-        # Clean and validate chapters
-        cleaned_structure: PDFStructure = {"chapters": []}
-
-        for chapter in structure["chapters"]:
-            if not isinstance(chapter, dict):
-                raise ValueError("Invalid chapter format")
-
-            cleaned_chapter: ChapterDict = {
-                "name": clean_name(chapter["name"]),
-                "topics": [],
+                    for chapter in json_structure.get("chapters", [])
+                ]
             }
 
-            # Clean and validate topics
-            if "topics" in chapter:
-                for topic in chapter["topics"]:
-                    if not isinstance(topic, dict):
-                        raise ValueError("Invalid topic format")
+            return fixed_structure
 
-                    cleaned_topic: TopicDict = {
-                        "name": clean_name(topic["name"]),
-                        "subtopics": [],
-                    }
-
-                    # Clean and validate subtopics
-                    if "subtopics" in topic:
-                        cleaned_topic["subtopics"] = process_subtopics(
-                            topic["subtopics"]
-                        )
-
-                    cleaned_chapter["topics"].append(cleaned_topic)
-
-            cleaned_structure["chapters"].append(cleaned_chapter)
-
-        logger.info("Structure validation and cleaning completed successfully")
-        return cleaned_structure
+        except Exception as e:
+            logger.error(f"Error fixing structure: {str(e)}")
+            # Return a valid empty structure as fallback
+            return PDFStructure(chapters=[])
 
     def generate_quiz_questions(
         self, gemini_file: GeminiFile, chapter: str
@@ -364,7 +438,7 @@ You are designated as an expert text analyst specializing in content organizatio
             prompt = f"""Generate a comprehensive multiple-choice quiz for the chapter '{chapter}' following these specifications:
 
             Structure:
-            - Total questions: 15 questions only.
+            - Total questions: fifteen questions only.
             - Difficulty levels: 3 (Easy, Medium, Hard)
             - Questions per level: 5
             - Options per question: 4 (A, B, C, D)
@@ -373,7 +447,7 @@ You are designated as an expert text analyst specializing in content organizatio
             1. Progress difficulty gradually:
             - Level 1 (Q1-5): Basic recall and understanding
             - Level 2 (Q6-10): Application and analysis
-            - Level 3 (Q11-15): Analysis, evaluation, and synthesis
+            - Level 3 (Q11-fifteen): Analysis, evaluation, and synthesis
 
             2. Question Characteristics:
             - Must be unique (no repetition)
@@ -409,7 +483,8 @@ You are designated as an expert text analyst specializing in content organizatio
             2. Has exactly 4 options labeled A through D
             3. Has one clear correct answer
             4. Includes an explanation for the correct answer
-            5. A total of 15 questions only.
+            5. A total of fifteen questions only.
+            6. Give me the proper explanation on why you chose those fifteen questions outside the JSON structure.
             """
 
             response = self.model.generate_content([gemini_file, prompt]).text

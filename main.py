@@ -8,14 +8,17 @@ from fastapi import (
     Form,
     status,
     Depends,
+    BackgroundTasks,
 )
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from pathlib import Path
 from typing import Optional
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import bcrypt
 
 from pdf import NoteGenerator
 from services import NoteService, UserService, FileService
@@ -44,6 +47,9 @@ user_service = UserService()
 file_service = FileService()
 db = DatabaseManager()
 note_generator = NoteGenerator()
+
+# Initialize scheduler
+scheduler = AsyncIOScheduler()
 
 
 async def get_current_user(request: Request) -> Optional[str]:
@@ -134,37 +140,27 @@ async def get_subtopic_page(
 
 
 @app.get("/api/topic_notes/{chapter}/{topic}")
-async def get_topic_notes(
+async def get_topic_notes_api(
     request: Request, chapter: str, topic: str, username: str = Depends(require_auth)
 ):
-    """API endpoint to get topic notes."""
-    try:
-        logger.info(f"Fetching notes for chapter: {chapter}, topic: {topic}")
-        response, status_code = await note_service.get_topic_notes(chapter, topic)
-        logger.info(f"Response status: {status_code}, content: {response}")
-        return JSONResponse(content=response, status_code=status_code)
-    except Exception as e:
-        logger.error(f"Error getting topic notes: {str(e)}")
-        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+    """API endpoint for topic notes."""
+    response, status_code = await note_service.get_topic_notes(chapter, topic)
+    return JSONResponse(content=response, status_code=status_code)
 
 
 @app.get("/api/notes/{chapter}/{topic}/{subtopic}")
-async def get_notes(
+async def get_notes_api(
     request: Request,
     chapter: str,
     topic: str,
     subtopic: str,
     username: str = Depends(require_auth),
 ):
-    """API endpoint to get subtopic notes."""
-    try:
-        response, status_code = await note_service.get_subtopic_notes(
-            chapter, topic, subtopic
-        )
-        return JSONResponse(content=response, status_code=status_code)
-    except Exception as e:
-        logger.error(f"Error getting subtopic notes: {str(e)}")
-        return JSONResponse(content={"error": "Internal server error"}, status_code=500)
+    """API endpoint for subtopic notes."""
+    response, status_code = await note_service.get_subtopic_notes(
+        chapter, topic, subtopic
+    )
+    return JSONResponse(content=response, status_code=status_code)
 
 
 @app.post("/upload_pdf/")
@@ -314,9 +310,6 @@ async def delete_pdf(request: Request, pdf_id: int):
         return JSONResponse(content={"error": "Internal server error"}, status_code=500)
 
 
-# Add these routes after your existing routes
-
-
 @app.get("/quiz/{chapter}", response_class=HTMLResponse)
 async def quiz_page(request: Request, chapter: str):
     """Render quiz page for a chapter."""
@@ -348,11 +341,6 @@ async def get_quiz(request: Request, chapter: str, new: bool = False):
                         },
                         status_code=200,
                     )
-
-        # If we get here, either:
-        # 1. No existing quiz was found
-        # 2. No questions were found for the existing quiz
-        # 3. new=True was specified
 
         # If no quiz exists, generate a new one
         chapter_info = db.get_chapter_info(chapter)
@@ -449,6 +437,123 @@ async def get_book_structure(pdf_id: int):
         return JSONResponse(
             content={"error": "Failed to get book structure"}, status_code=500
         )
+
+
+@app.get("/profile", response_class=HTMLResponse)
+async def profile_page(request: Request):
+    """Render user profile page."""
+    try:
+        username = request.session.get("username")
+        if not username:
+            return RedirectResponse(url="/login", status_code=303)
+
+        # Get user profile data and detailed statistics
+        user_data = db.get_user_profile(username)
+        if not user_data:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Get detailed user statistics
+        stats = db.get_user_detailed_statistics(username)
+
+        return templates.TemplateResponse(
+            "profile.html",
+            {
+                "request": request,
+                "username": username,
+                "user_data": user_data,
+                "stats": stats,
+            },
+        )
+    except Exception as e:
+        logger.error(f"Error rendering profile page: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+def hash_password(password: str) -> str:
+    """Hash a password using bcrypt."""
+    salt = bcrypt.gensalt(rounds=12)
+    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash."""
+    return bcrypt.checkpw(
+        plain_password.encode("utf-8"), hashed_password.encode("utf-8")
+    )
+
+
+@app.post("/update-profile")
+async def update_profile(
+    request: Request,
+    email: str = Form(...),
+    current_password: str = Form(None),
+    new_password: str = Form(None),
+):
+    """Update user profile information."""
+    try:
+        username = request.session.get("username")
+        if not username:
+            return JSONResponse(content={"error": "Not authenticated"}, status_code=401)
+
+        # Verify current password if changing password
+        if new_password:
+            if not current_password:
+                return JSONResponse(
+                    content={"error": "Current password required"}, status_code=400
+                )
+
+            user = db.get_user(username)
+            if not user or not verify_password(current_password, user["password_hash"]):
+                return JSONResponse(
+                    content={"error": "Invalid current password"}, status_code=400
+                )
+
+        # Update profile
+        updates = {"email": email}
+        if new_password:
+            updates["password_hash"] = hash_password(new_password)
+
+        db.update_user_profile(username, updates)
+
+        return JSONResponse(content={"message": "Profile updated successfully"})
+
+    except Exception as e:
+        logger.error(f"Error updating profile: {str(e)}")
+        return JSONResponse(
+            content={"error": "Failed to update profile"}, status_code=500
+        )
+
+
+async def check_db_connection():
+    """Background task to check database connection."""
+    try:
+        db.check_connection_health()
+    except Exception as e:
+        logger.error(f"Database health check failed: {str(e)}")
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start the scheduler on app startup."""
+    # More frequent checks during development
+    scheduler.add_job(
+        check_db_connection,
+        "interval",
+        minutes=2,  # Check every 2 minutes
+        max_instances=1,  # Prevent overlapping executions
+        coalesce=True,
+    )  # Combine missed executions
+    scheduler.start()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Cleanup on app shutdown."""
+    scheduler.shutdown()
+    if hasattr(db, "pool"):
+        if not db.pool:
+            raise ValueError("Database connection pool not established")
+        db.pool.closeall()
 
 
 if __name__ == "__main__":
